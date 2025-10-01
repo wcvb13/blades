@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"cloud.google.com/go/auth"
-	"cloud.google.com/go/auth/credentials"
 	"github.com/go-kratos/blades"
 	"google.golang.org/genai"
 )
@@ -22,58 +20,13 @@ var (
 
 // Client provides a unified interface for both Vertex AI and GenAI backends
 type Client struct {
-	config      *GeminiConfig
 	genaiClient *genai.Client
 }
 
-// NewClient creates a new Gemini client with the given configuration
-func NewClient(ctx context.Context, config *GeminiConfig) (*Client, error) {
-	if config == nil {
-		return nil, fmt.Errorf("config cannot be nil")
-	}
-
-	// Only check if backend is set - Google GenAI SDK handles detailed validation internally
-	if config.Backend == "" {
-		return nil, fmt.Errorf("backend must be specified")
-	}
-
-	// Convert Gemini config to GenAI SDK config
-	clientConfig := &genai.ClientConfig{}
-
-	switch config.Backend {
-	case BackendVertexAI:
-		clientConfig.Backend = genai.BackendVertexAI
-		clientConfig.Project = config.Project
-		clientConfig.Location = config.Location
-
-		// Handle credentials for Vertex AI
-		if config.CredentialsPath != "" || config.CredentialsContent != "" {
-			var creds *auth.Credentials
-			var err error
-
-			if config.CredentialsPath != "" {
-				// Load credentials from file path
-				creds, err = credentials.DetectDefault(&credentials.DetectOptions{
-					Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
-					CredentialsFile: config.CredentialsPath,
-				})
-			} else if config.CredentialsContent != "" {
-				// Load credentials from JSON content
-				creds, err = credentials.DetectDefault(&credentials.DetectOptions{
-					Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
-					CredentialsJSON: []byte(config.CredentialsContent),
-				})
-			}
-
-			if err != nil {
-				return nil, fmt.Errorf("loading credentials: %w", err)
-			}
-			clientConfig.Credentials = creds
-		}
-
-	case BackendGenAI:
-		clientConfig.Backend = genai.BackendGeminiAPI
-		clientConfig.APIKey = config.APIKey
+// NewClient creates a new Gemini client with the given genai.ClientConfig
+func NewClient(ctx context.Context, clientConfig *genai.ClientConfig) (*Client, error) {
+	if clientConfig == nil {
+		return nil, fmt.Errorf("clientConfig cannot be nil")
 	}
 
 	genaiClient, err := genai.NewClient(ctx, clientConfig)
@@ -82,7 +35,6 @@ func NewClient(ctx context.Context, config *GeminiConfig) (*Client, error) {
 	}
 
 	return &Client{
-		config:      config,
 		genaiClient: genaiClient,
 	}, nil
 }
@@ -136,24 +88,20 @@ func (c *Client) generateWithIterations(ctx context.Context, req *blades.ModelRe
 		generateConfig.TopP = &topP
 	}
 
-	// Apply Gemini-specific configuration
-	if c.config.ThinkingBudget != nil || c.config.IncludeThoughts != nil {
+	// Apply Gemini-specific configuration from ModelOptions
+	if opt.ThinkingBudget != nil || opt.IncludeThoughts != nil {
 		// Configure thinking with budget and include thoughts options
 		thinkingConfig := &genai.ThinkingConfig{}
 
-		if c.config.ThinkingBudget != nil {
-			thinkingConfig.ThinkingBudget = c.config.ThinkingBudget
+		if opt.ThinkingBudget != nil {
+			thinkingConfig.ThinkingBudget = opt.ThinkingBudget
 		}
 
-		if c.config.IncludeThoughts != nil {
-			thinkingConfig.IncludeThoughts = *c.config.IncludeThoughts
+		if opt.IncludeThoughts != nil {
+			thinkingConfig.IncludeThoughts = *opt.IncludeThoughts
 		}
 
 		generateConfig.ThinkingConfig = thinkingConfig
-	}
-	// Apply custom safety settings if provided
-	if len(c.config.SafetySettings) > 0 {
-		generateConfig.SafetySettings = c.config.SafetySettings
 	}
 
 	// Convert tools if provided
@@ -252,24 +200,20 @@ func (c *Client) GenerateStream(ctx context.Context, req *blades.ModelRequest, o
 		generateConfig.TopP = &topP
 	}
 
-	// Apply Gemini-specific configuration
-	if c.config.ThinkingBudget != nil || c.config.IncludeThoughts != nil {
+	// Apply Gemini-specific configuration from ModelOptions
+	if opt.ThinkingBudget != nil || opt.IncludeThoughts != nil {
 		// Configure thinking with budget and include thoughts options
 		thinkingConfig := &genai.ThinkingConfig{}
 
-		if c.config.ThinkingBudget != nil {
-			thinkingConfig.ThinkingBudget = c.config.ThinkingBudget
+		if opt.ThinkingBudget != nil {
+			thinkingConfig.ThinkingBudget = opt.ThinkingBudget
 		}
 
-		if c.config.IncludeThoughts != nil {
-			thinkingConfig.IncludeThoughts = *c.config.IncludeThoughts
+		if opt.IncludeThoughts != nil {
+			thinkingConfig.IncludeThoughts = *opt.IncludeThoughts
 		}
 
 		generateConfig.ThinkingConfig = thinkingConfig
-	}
-	// Apply custom safety settings if provided
-	if len(c.config.SafetySettings) > 0 {
-		generateConfig.SafetySettings = c.config.SafetySettings
 	}
 
 	// Convert tools if provided
