@@ -359,7 +359,7 @@ func (c *Client) NewStream(ctx context.Context, req *blades.ModelRequest, opts .
 func toolCall(ctx context.Context, tools []*blades.Tool, name, arguments string) (string, error) {
 	for _, tool := range tools {
 		if tool.Name == name {
-			return tool.Handle(ctx, arguments)
+			return tool.Handler.Handle(ctx, arguments)
 		}
 	}
 	return "", ErrToolNotFound
