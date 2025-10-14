@@ -1,4 +1,4 @@
-package blades
+package tools
 
 import (
 	"context"
@@ -100,11 +100,11 @@ func TestHandleFuncInvalidPayload(t *testing.T) {
 
 func TestCustomHandler(t *testing.T) {
 	handler := &struct {
-		ToolHandler
+		Handler
 		prefix string
 	}{prefix: "custom: "}
 
-	handler.ToolHandler = HandleFunc(func(ctx context.Context, input string) (string, error) {
+	handler.Handler = HandleFunc(func(ctx context.Context, input string) (string, error) {
 		return handler.prefix + input, nil
 	})
 
