@@ -2,6 +2,8 @@ package blades
 
 import (
 	"context"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // ModelOption configures a single request. Providers may ignore options
@@ -48,14 +50,16 @@ type AudioOptions struct {
 
 // ModelRequest is a multimodal chat-style request to the provider.
 type ModelRequest struct {
-	Model    string     `json:"model"`
-	Tools    []*Tool    `json:"tools,omitempty"`
-	Messages []*Message `json:"messages"`
+	Model        string             `json:"model"`
+	Tools        []*Tool            `json:"tools,omitempty"`
+	Messages     []*Message         `json:"messages"`
+	InputSchema  *jsonschema.Schema `json:"inputSchema,omitempty"`
+	OutputSchema *jsonschema.Schema `json:"outputSchema,omitempty"`
 }
 
 // ModelResponse is a single assistant message as a result of generation.
 type ModelResponse struct {
-	Messages []*Message `json:"message"`
+	Message *Message `json:"message"`
 }
 
 // ModelProvider is an interface for multimodal chat-style models.
@@ -63,5 +67,5 @@ type ModelProvider interface {
 	// Generate Generate executes the request and returns a single assistant response.
 	Generate(context.Context, *ModelRequest, ...ModelOption) (*ModelResponse, error)
 	// NewStream executes the request and returns a stream of assistant responses.
-	NewStream(context.Context, *ModelRequest, ...ModelOption) (Streamer[*ModelResponse], error)
+	NewStream(context.Context, *ModelRequest, ...ModelOption) (Streamable[*ModelResponse], error)
 }

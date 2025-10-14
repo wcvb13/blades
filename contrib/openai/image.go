@@ -56,7 +56,7 @@ func (p *ImageProvider) Generate(ctx context.Context, req *blades.ModelRequest, 
 }
 
 // NewStream wraps Generate with a single-yield stream for API compatibility.
-func (p *ImageProvider) NewStream(ctx context.Context, req *blades.ModelRequest, opts ...blades.ModelOption) (blades.Streamer[*blades.ModelResponse], error) {
+func (p *ImageProvider) NewStream(ctx context.Context, req *blades.ModelRequest, opts ...blades.ModelOption) (blades.Streamable[*blades.ModelResponse], error) {
 	pipe := blades.NewStreamPipe[*blades.ModelResponse]()
 	pipe.Go(func() error {
 		res, err := p.Generate(ctx, req, opts...)
@@ -158,7 +158,7 @@ func toImageResponse(res *openai.ImagesResponse) (*blades.ModelResponse, error) 
 	if len(message.Parts) == 0 {
 		return nil, ErrImageGenerationEmpty
 	}
-	return &blades.ModelResponse{Messages: []*blades.Message{message}}, nil
+	return &blades.ModelResponse{Message: message}, nil
 }
 
 func mimeFromOutputFormat(format openai.ImagesResponseOutputFormat) blades.MimeType {

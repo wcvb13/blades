@@ -1,13 +1,15 @@
 package blades
 
+import "sync/atomic"
+
 // MappedStream maps the output of one Streamer to another type.
 type MappedStream[M any, T any] struct {
-	stream   Streamer[M]
+	stream   Streamable[M]
 	transfer func(M) (T, error)
 }
 
 // NewMappedStream creates a new MappedStream.
-func NewMappedStream[M any, T any](stream Streamer[M], transfer func(M) (T, error)) *MappedStream[M, T] {
+func NewMappedStream[M any, T any](stream Streamable[M], transfer func(M) (T, error)) *MappedStream[M, T] {
 	return &MappedStream[M, T]{stream: stream, transfer: transfer}
 }
 
@@ -32,9 +34,10 @@ func (ws *MappedStream[M, T]) Close() error {
 
 // StreamPipe directs the yielding of values.
 type StreamPipe[T any] struct {
-	err   error
-	queue chan T
-	next  T
+	err    error
+	closed atomic.Bool
+	queue  chan T
+	next   T
 }
 
 // NewStreamPipe creates a new StreamPipe director.
@@ -73,6 +76,9 @@ func (d *StreamPipe[T]) Go(fn func() error) {
 
 // Close closes the StreamPipe.
 func (d *StreamPipe[T]) Close() error {
+	if d.closed.Swap(true) {
+		return nil
+	}
 	close(d.queue)
 	return nil
 }

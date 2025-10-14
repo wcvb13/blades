@@ -6,6 +6,8 @@ type ctxAgentKey struct{}
 
 // AgentContext holds information about the agent handling the request.
 type AgentContext struct {
+	Name         string
+	Description  string
 	Model        string
 	Instructions string
 }

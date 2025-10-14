@@ -73,48 +73,47 @@ func (c *Client) generateWithIterations(ctx context.Context, req *blades.ModelRe
 	}
 
 	// Handle tool calls if any - following pattern from gemini/openai
-	for _, msg := range response.Messages {
-		if len(msg.ToolCalls) > 0 {
-			// Add the assistant's message with tool calls to conversation history
-			assistantMsg := &blades.Message{
-				Role:      blades.RoleAssistant,
-				Parts:     msg.Parts,
-				ToolCalls: msg.ToolCalls,
-			}
-			req.Messages = append(req.Messages, assistantMsg)
-
-			// Execute each tool call and add results to conversation
-			for _, tc := range msg.ToolCalls {
-				// Execute the tool call
-				result, err := toolCall(ctx, req.Tools, tc.Name, tc.Arguments)
-				if err != nil {
-					return nil, fmt.Errorf("executing tool %s: %w", tc.Name, err)
-				}
-				// Set the result
-				tc.Result = result
-
-				// Add tool result message to conversation history for the LLM
-				toolResultMsg := &blades.Message{
-					Role:      blades.RoleTool,
-					ToolCalls: []*blades.ToolCall{tc},
-				}
-				req.Messages = append(req.Messages, toolResultMsg)
-			}
-
-			// Set message role to Tool for the response
-			msg.Role = blades.RoleTool
-
-			// Recursively call generateWithIterations to handle tool response continuation
-			opt.MaxIterations--
-			return c.generateWithIterations(ctx, req, opt)
+	msg := response.Message
+	if len(msg.ToolCalls) > 0 {
+		// Add the assistant's message with tool calls to conversation history
+		assistantMsg := &blades.Message{
+			Role:      blades.RoleAssistant,
+			Parts:     msg.Parts,
+			ToolCalls: msg.ToolCalls,
 		}
+		req.Messages = append(req.Messages, assistantMsg)
+
+		// Execute each tool call and add results to conversation
+		for _, tc := range msg.ToolCalls {
+			// Execute the tool call
+			result, err := toolCall(ctx, req.Tools, tc.Name, tc.Arguments)
+			if err != nil {
+				return nil, fmt.Errorf("executing tool %s: %w", tc.Name, err)
+			}
+			// Set the result
+			tc.Result = result
+
+			// Add tool result message to conversation history for the LLM
+			toolResultMsg := &blades.Message{
+				Role:      blades.RoleTool,
+				ToolCalls: []*blades.ToolCall{tc},
+			}
+			req.Messages = append(req.Messages, toolResultMsg)
+		}
+
+		// Set message role to Tool for the response
+		msg.Role = blades.RoleTool
+
+		// Recursively call generateWithIterations to handle tool response continuation
+		opt.MaxIterations--
+		return c.generateWithIterations(ctx, req, opt)
 	}
 
 	return response, nil
 }
 
 // NewStream executes the request and returns a stream of assistant responses
-func (c *Client) NewStream(ctx context.Context, req *blades.ModelRequest, opts ...blades.ModelOption) (blades.Streamer[*blades.ModelResponse], error) {
+func (c *Client) NewStream(ctx context.Context, req *blades.ModelRequest, opts ...blades.ModelOption) (blades.Streamable[*blades.ModelResponse], error) {
 	// Apply model options with default MaxIterations
 	opt := blades.ModelOptions{MaxIterations: 3}
 	for _, apply := range opts {
@@ -125,7 +124,7 @@ func (c *Client) NewStream(ctx context.Context, req *blades.ModelRequest, opts .
 }
 
 // generateStream generates streaming content using the Claude API
-func (c *Client) generateStream(ctx context.Context, req *blades.ModelRequest, opt blades.ModelOptions) (blades.Streamer[*blades.ModelResponse], error) {
+func (c *Client) generateStream(ctx context.Context, req *blades.ModelRequest, opt blades.ModelOptions) (blades.Streamable[*blades.ModelResponse], error) {
 	// Ensure we have at least one iteration left
 	if opt.MaxIterations < 1 {
 		return nil, ErrTooManyIterations
@@ -178,52 +177,51 @@ func (c *Client) generateStream(ctx context.Context, req *blades.ModelRequest, o
 		}
 
 		// Handle tool calls if any
-		for _, msg := range finalResponse.Messages {
-			if len(msg.ToolCalls) > 0 {
-				// Add the assistant's message with tool calls to conversation history
-				assistantMsg := &blades.Message{
-					Role:      blades.RoleAssistant,
-					Parts:     msg.Parts,
-					ToolCalls: msg.ToolCalls,
-				}
-				req.Messages = append(req.Messages, assistantMsg)
+		msg := finalResponse.Message
+		if len(msg.ToolCalls) > 0 {
+			// Add the assistant's message with tool calls to conversation history
+			assistantMsg := &blades.Message{
+				Role:      blades.RoleAssistant,
+				Parts:     msg.Parts,
+				ToolCalls: msg.ToolCalls,
+			}
+			req.Messages = append(req.Messages, assistantMsg)
 
-				// Execute each tool call and add results to conversation
-				for _, tc := range msg.ToolCalls {
-					// Execute the tool call
-					result, err := toolCall(ctx, req.Tools, tc.Name, tc.Arguments)
-					if err != nil {
-						return err
-					}
-					// Set the result
-					tc.Result = result
-
-					// Add tool result message to conversation history for the LLM
-					toolResultMsg := &blades.Message{
-						Role: blades.RoleTool,
-						Parts: []blades.Part{
-							blades.TextPart{Text: result},
-						},
-						ToolCalls: []*blades.ToolCall{tc},
-					}
-					req.Messages = append(req.Messages, toolResultMsg)
-				}
-
-				// Recursively call generateStream to handle tool response continuation
-				opt.MaxIterations--
-				toolStream, err := c.generateStream(ctx, req, opt)
+			// Execute each tool call and add results to conversation
+			for _, tc := range msg.ToolCalls {
+				// Execute the tool call
+				result, err := toolCall(ctx, req.Tools, tc.Name, tc.Arguments)
 				if err != nil {
 					return err
 				}
+				// Set the result
+				tc.Result = result
 
-				// Forward all responses from the tool stream
-				for toolStream.Next() {
-					toolResponse, err := toolStream.Current()
-					if err != nil {
-						return err
-					}
-					pipe.Send(toolResponse)
+				// Add tool result message to conversation history for the LLM
+				toolResultMsg := &blades.Message{
+					Role: blades.RoleTool,
+					Parts: []blades.Part{
+						blades.TextPart{Text: result},
+					},
+					ToolCalls: []*blades.ToolCall{tc},
 				}
+				req.Messages = append(req.Messages, toolResultMsg)
+			}
+
+			// Recursively call generateStream to handle tool response continuation
+			opt.MaxIterations--
+			toolStream, err := c.generateStream(ctx, req, opt)
+			if err != nil {
+				return err
+			}
+
+			// Forward all responses from the tool stream
+			for toolStream.Next() {
+				toolResponse, err := toolStream.Current()
+				if err != nil {
+					return err
+				}
+				pipe.Send(toolResponse)
 			}
 		}
 
