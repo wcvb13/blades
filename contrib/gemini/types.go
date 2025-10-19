@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/go-kratos/blades"
@@ -32,7 +33,30 @@ func convertMessageToGenAI(req *blades.ModelRequest) (*genai.Content, []*genai.C
 			if err != nil {
 				return nil, nil, err
 			}
+			// If message has tool calls, add them as FunctionCall parts
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					// Parse arguments back to map
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
+						return nil, nil, fmt.Errorf("unmarshaling tool arguments: %w", err)
+					}
+					parts = append(parts, genai.NewPartFromFunctionCall(tc.Name, args))
+				}
+			}
 			contents = append(contents, &genai.Content{Role: genai.RoleModel, Parts: parts})
+		case blades.RoleTool:
+			// Tool result messages - convert to function response parts
+			var parts []*genai.Part
+			for _, tc := range msg.ToolCalls {
+				// Create response map with result
+				response := map[string]any{
+					"output": tc.Result,
+				}
+				parts = append(parts, genai.NewPartFromFunctionResponse(tc.Name, response))
+			}
+			// Tool results are sent as user role in Gemini
+			contents = append(contents, &genai.Content{Role: genai.RoleUser, Parts: parts})
 		}
 	}
 	return system, contents, nil
@@ -94,17 +118,35 @@ func convertBladesToolToGenAI(tool *tools.Tool) (*genai.Tool, error) {
 }
 
 func convertGenAIToBlades(resp *genai.GenerateContentResponse) (*blades.ModelResponse, error) {
-	message := &blades.Message{Status: blades.StatusIncomplete}
+	message := &blades.Message{
+		Role:   blades.RoleAssistant,
+		Status: blades.StatusIncomplete,
+	}
 	for _, candidate := range resp.Candidates {
 		if candidate.Content == nil {
 			continue
 		}
 		for _, part := range candidate.Content.Parts {
-			bladesPart, err := convertGenAIPartToBlades(part)
-			if err != nil {
-				return nil, err
+			// Check if this is a function call
+			if part.FunctionCall != nil {
+				// Convert to blades.ToolCall
+				args, err := json.Marshal(part.FunctionCall.Args)
+				if err != nil {
+					return nil, fmt.Errorf("marshaling function call args: %w", err)
+				}
+				message.ToolCalls = append(message.ToolCalls, &blades.ToolCall{
+					ID:        part.FunctionCall.ID,
+					Name:      part.FunctionCall.Name,
+					Arguments: string(args),
+				})
+			} else {
+				// Regular part (text, file, inline data)
+				bladesPart, err := convertGenAIPartToBlades(part)
+				if err != nil {
+					return nil, err
+				}
+				message.Parts = append(message.Parts, bladesPart)
 			}
-			message.Parts = append(message.Parts, bladesPart)
 		}
 	}
 	return &blades.ModelResponse{Message: message}, nil

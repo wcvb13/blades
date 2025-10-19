@@ -2,22 +2,18 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/go-kratos/blades"
-	"github.com/go-kratos/blades/tools"
 )
 
 var (
 	// ErrEmptyResponse indicates the provider returned no content.
 	ErrEmptyResponse = errors.New("empty completion response")
-	// ErrToolNotFound indicates a tool call was made to an unknown tool.
-	ErrToolNotFound = errors.New("tool not found")
-	// ErrTooManyIterations indicates the max iterations option is less than 1.
-	ErrTooManyIterations = errors.New("too many iterations requested")
 )
 
 // Option is a functional option for configuring the Claude client.
@@ -30,18 +26,10 @@ func WithThinking(thinking *anthropic.ThinkingConfigParamUnion) Option {
 	}
 }
 
-// WithMaxToolIterations sets the maximum number of tool iterations.
-func WithMaxToolIterations(n int) Option {
-	return func(o *Options) {
-		o.MaxToolIterations = n
-	}
-}
-
 // Options holds configuration for the Claude client.
 type Options struct {
-	MaxToolIterations int
-	Thinking          *anthropic.ThinkingConfigParamUnion
-	RequestOpts       []option.RequestOption
+	Thinking    *anthropic.ThinkingConfigParamUnion
+	RequestOpts []option.RequestOption
 }
 
 // Provider provides a unified interface for Claude API access.
@@ -56,7 +44,7 @@ type Provider struct {
 //   - AWS Bedrock: bedrock.WithLoadDefaultConfig(ctx)
 //   - Google Vertex: vertex.WithGoogleAuth(ctx, region, projectID)
 func NewProvider(opts ...Option) *Provider {
-	opt := Options{MaxToolIterations: 5}
+	opt := Options{}
 	for _, apply := range opts {
 		apply(&opt)
 	}
@@ -77,30 +65,14 @@ func (c *Provider) Generate(ctx context.Context, req *blades.ModelRequest, opts 
 	if err != nil {
 		return nil, fmt.Errorf("converting request: %w", err)
 	}
-	return c.generate(ctx, params, req.Tools, c.opts.MaxToolIterations)
-}
-
-// generateWithIterations handles the recursive tool calling logic
-func (c *Provider) generate(ctx context.Context, params *anthropic.MessageNewParams, tools []*tools.Tool, maxToolIterations int) (*blades.ModelResponse, error) {
-	if maxToolIterations < 1 {
-		return nil, ErrTooManyIterations
-	}
 	message, err := c.client.Messages.New(ctx, *params)
 	if err != nil {
 		return nil, fmt.Errorf("generating content: %w", err)
 	}
+	// Convert response without executing tools (execution moved to Agent layer)
 	response, err := convertClaudeToBlades(message)
 	if err != nil {
 		return nil, err
-	}
-	if len(response.Message.ToolCalls) > 0 {
-		maxToolIterations--
-		toolMessages, err := buildToolMesssage(ctx, message, tools)
-		if err != nil {
-			return nil, err
-		}
-		params.Messages = append(params.Messages, toolMessages...)
-		return c.generate(ctx, params, tools, maxToolIterations)
 	}
 	return response, nil
 }
@@ -115,15 +87,7 @@ func (c *Provider) NewStream(ctx context.Context, req *blades.ModelRequest, opts
 	if err != nil {
 		return nil, fmt.Errorf("converting request: %w", err)
 	}
-	return c.newStreaming(ctx, params, req.Tools, c.opts.MaxToolIterations)
-}
-
-func (c *Provider) newStreaming(ctx context.Context, params *anthropic.MessageNewParams, tools []*tools.Tool, maxToolIterations int) (blades.Streamable[*blades.ModelResponse], error) {
-	// Ensure we have at least one iteration left
-	if maxToolIterations < 1 {
-		return nil, ErrTooManyIterations
-	}
-	// Create stream pipe like in openai/gemini
+	// Create stream pipe
 	pipe := blades.NewStreamPipe[*blades.ModelResponse]()
 	pipe.Go(func() error {
 		stream := c.client.Messages.NewStreaming(ctx, *params)
@@ -146,31 +110,12 @@ func (c *Provider) newStreaming(ctx context.Context, params *anthropic.MessageNe
 		if err := stream.Err(); err != nil {
 			return err
 		}
-		// After streaming is complete, check for tool calls in accumulated message
+		// After streaming is complete, send final response without executing tools (execution moved to Agent layer)
 		finalResponse, err := convertClaudeToBlades(message)
 		if err != nil {
 			return err
 		}
-		// Handle tool calls if any
-		if len(finalResponse.Message.ToolCalls) > 0 {
-			maxToolIterations--
-			toolMessages, err := buildToolMesssage(ctx, message, tools)
-			if err != nil {
-				return err
-			}
-			params.Messages = append(params.Messages, toolMessages...)
-			toolStream, err := c.newStreaming(ctx, params, tools, maxToolIterations)
-			if err != nil {
-				return err
-			}
-			for toolStream.Next() {
-				toolResponse, err := toolStream.Current()
-				if err != nil {
-					return err
-				}
-				pipe.Send(toolResponse)
-			}
-		}
+		pipe.Send(finalResponse)
 		return nil
 	})
 	return pipe, nil
@@ -206,11 +151,35 @@ func (c *Provider) toClaudeParams(req *blades.ModelRequest, opt blades.ModelOpti
 			}
 			params.Messages = append(params.Messages, anthropic.NewUserMessage(content...))
 		case blades.RoleAssistant:
+			// Convert text parts
 			content, err := convertPartsToContent(msg.Parts)
 			if err != nil {
 				return params, err
 			}
+			// If message has tool calls, add them to content
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					// Parse the arguments back to map for Claude SDK
+					var input map[string]any
+					if err := json.Unmarshal([]byte(tc.Arguments), &input); err != nil {
+						return params, fmt.Errorf("unmarshaling tool arguments: %w", err)
+					}
+					content = append(content, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
+				}
+			}
 			params.Messages = append(params.Messages, anthropic.NewAssistantMessage(content...))
+		case blades.RoleTool:
+			// Tool result messages - convert to user message with tool results
+			var content []anthropic.ContentBlockParamUnion
+			for _, tc := range msg.ToolCalls {
+				// Check if result indicates error
+				isError := false
+				if tc.Result != "" && len(tc.Result) > 6 && tc.Result[:6] == "Error:" {
+					isError = true
+				}
+				content = append(content, anthropic.NewToolResultBlock(tc.ID, tc.Result, isError))
+			}
+			params.Messages = append(params.Messages, anthropic.NewUserMessage(content...))
 		}
 	}
 	if len(req.Tools) > 0 {

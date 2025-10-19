@@ -12,10 +12,6 @@ import (
 var (
 	// ErrEmptyResponse indicates the provider returned no choices.
 	ErrEmptyResponse = errors.New("empty completion response")
-	// ErrToolNotFound indicates a tool call was made to an unknown tool.
-	ErrToolNotFound = errors.New("tool not found")
-	// ErrTooManyIterations indicates the max iterations option is less than 1.
-	ErrTooManyIterations = errors.New("too many iterations requested")
 )
 
 // Option defines a configuration option for the Provider.
@@ -28,17 +24,9 @@ func WithThinkingConfig(c *genai.ThinkingConfig) Option {
 	}
 }
 
-// WithMaxToolIterations sets the maximum number of tool iterations.
-func WithMaxToolIterations(n int) Option {
-	return func(o *Options) {
-		o.MaxToolIterations = n
-	}
-}
-
 // Options holds configuration options for the Provider.
 type Options struct {
-	MaxToolIterations int
-	ThinkingConfig    *genai.ThinkingConfig
+	ThinkingConfig *genai.ThinkingConfig
 }
 
 // Provider provides a unified interface for Gemini API access.
@@ -48,7 +36,7 @@ type Provider struct {
 }
 
 func NewProvider(ctx context.Context, clientConfig *genai.ClientConfig, opts ...Option) (*Provider, error) {
-	opt := Options{MaxToolIterations: 5}
+	opt := Options{}
 	for _, apply := range opts {
 		apply(&opt)
 	}
@@ -67,7 +55,7 @@ func (c *Provider) Generate(ctx context.Context, req *blades.ModelRequest, opts 
 	for _, apply := range opts {
 		apply(&opt)
 	}
-	return c.generate(ctx, req, opt, c.opts.MaxToolIterations)
+	return c.generate(ctx, req, opt)
 }
 
 func (c *Provider) toGenerateConfig(req *blades.ModelRequest, opt blades.ModelOptions) (*genai.GenerateContentConfig, error) {
@@ -96,10 +84,7 @@ func (c *Provider) toGenerateConfig(req *blades.ModelRequest, opt blades.ModelOp
 	return &config, nil
 }
 
-func (c *Provider) generate(ctx context.Context, req *blades.ModelRequest, opt blades.ModelOptions, maxToolIterations int) (*blades.ModelResponse, error) {
-	if maxToolIterations < 1 {
-		return nil, ErrTooManyIterations
-	}
+func (c *Provider) generate(ctx context.Context, req *blades.ModelRequest, opt blades.ModelOptions) (*blades.ModelResponse, error) {
 	system, contents, err := convertMessageToGenAI(req)
 	if err != nil {
 		return nil, err
@@ -114,22 +99,17 @@ func (c *Provider) generate(ctx context.Context, req *blades.ModelRequest, opt b
 	if err != nil {
 		return nil, fmt.Errorf("generating content: %w", err)
 	}
-	// Convert response and handle tool execution inline
+	// Convert response without executing tools (execution moved to Agent layer)
 	response, err := convertGenAIToBlades(resp)
 	if err != nil {
 		return nil, err
 	}
-	// TODO: handle tools
 	return response, nil
 }
 
 // GenerateStream generates streaming content using the configured backend
 // Returns blades.Streamer[*blades.ModelResponse] following openai pattern
-func (c *Provider) GenerateStream(ctx context.Context, req *blades.ModelRequest, opt blades.ModelOptions, maxToolIterations int) (blades.Streamable[*blades.ModelResponse], error) {
-	// Ensure we have at least one iteration left
-	if maxToolIterations < 1 {
-		return nil, ErrTooManyIterations
-	}
+func (c *Provider) GenerateStream(ctx context.Context, req *blades.ModelRequest, opt blades.ModelOptions) (blades.Streamable[*blades.ModelResponse], error) {
 	system, contents, err := convertMessageToGenAI(req)
 	if err != nil {
 		return nil, err
@@ -144,7 +124,7 @@ func (c *Provider) GenerateStream(ctx context.Context, req *blades.ModelRequest,
 	pipe.Go(func() error {
 		// Get streaming iterator from GenAI client
 		stream := c.client.Models.GenerateContentStream(ctx, req.Model, contents, config)
-		// Accumulate chunks to build final response for tool call handling
+		// Accumulate chunks to build final response
 		var accumulatedResponse *genai.GenerateContentResponse
 		// Process stream chunks using iterator pattern
 		for chunk, err := range stream {
@@ -157,7 +137,7 @@ func (c *Provider) GenerateStream(ctx context.Context, req *blades.ModelRequest,
 				return err
 			}
 			pipe.Send(response)
-			// Accumulate chunks for final tool call processing
+			// Accumulate chunks for final response
 			if accumulatedResponse == nil {
 				accumulatedResponse = chunk
 			} else {
@@ -180,14 +160,13 @@ func (c *Provider) GenerateStream(ctx context.Context, req *blades.ModelRequest,
 				}
 			}
 		}
-		// After streaming is complete, check for tool calls in accumulated response
+		// After streaming is complete, send final response without executing tools (execution moved to Agent layer)
 		if accumulatedResponse != nil {
 			finalResponse, err := convertGenAIToBlades(accumulatedResponse)
 			if err != nil {
 				return err
 			}
 			finalResponse.Message.Status = blades.StatusCompleted
-			// TODO: handle tools
 			pipe.Send(finalResponse)
 		}
 		return nil
@@ -201,5 +180,5 @@ func (c *Provider) NewStream(ctx context.Context, req *blades.ModelRequest, opts
 	for _, apply := range opts {
 		apply(&opt)
 	}
-	return c.GenerateStream(ctx, req, opt, c.opts.MaxToolIterations)
+	return c.GenerateStream(ctx, req, opt)
 }

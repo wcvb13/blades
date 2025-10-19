@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 
@@ -94,35 +93,4 @@ func convertStreamDeltaToBlades(event anthropic.ContentBlockDeltaEvent) (*blades
 		response.Message = msg
 	}
 	return response, nil
-}
-
-func buildToolMesssage(ctx context.Context, message *anthropic.Message, tools []*tools.Tool) ([]anthropic.MessageParam, error) {
-	var (
-		toolMessages []anthropic.MessageParam
-		toolResults  []anthropic.ContentBlockParamUnion
-	)
-	for _, block := range message.Content {
-		switch variant := block.AsAny().(type) {
-		case anthropic.ToolUseBlock:
-			args := variant.JSON.Input.Raw()
-			result, err := handleToolCall(ctx, tools, variant.Name, args)
-			if err != nil {
-				return nil, err
-			}
-			toolResults = append(toolResults, anthropic.NewToolResultBlock(variant.ID, result, false))
-		}
-	}
-	toolMessages = append(toolMessages, message.ToParam())
-	toolMessages = append(toolMessages, anthropic.NewUserMessage(toolResults...))
-	return toolMessages, nil
-}
-
-// handleToolCall invokes a tool by name with the given arguments.
-func handleToolCall(ctx context.Context, tools []*tools.Tool, name, arguments string) (string, error) {
-	for _, tool := range tools {
-		if tool.Name == name {
-			return tool.Handler.Handle(ctx, arguments)
-		}
-	}
-	return "", ErrToolNotFound
 }

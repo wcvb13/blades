@@ -2,6 +2,8 @@ package blades
 
 import (
 	"context"
+	"fmt"
+	"sync"
 
 	"github.com/go-kratos/blades/tools"
 	"github.com/google/jsonschema-go/jsonschema"
@@ -77,25 +79,36 @@ func WithMiddleware(m Middleware) Option {
 	}
 }
 
+// WithMaxIterations sets the maximum number of tool execution loop iterations.
+// Default is 10 (similar to LangGraph's recursion_limit).
+// Set to 0 to disable automatic tool execution.
+func WithMaxIterations(n int) Option {
+	return func(a *Agent) {
+		a.maxIterations = n
+	}
+}
+
 // Agent is a struct that represents an AI agent.
 type Agent struct {
-	name         string
-	model        string
-	description  string
-	instructions string
-	outputKey    string
-	inputSchema  *jsonschema.Schema
-	outputSchema *jsonschema.Schema
-	middleware   Middleware
-	provider     ModelProvider
-	tools        []*tools.Tool
+	name          string
+	model         string
+	description   string
+	instructions  string
+	outputKey     string
+	inputSchema   *jsonschema.Schema
+	outputSchema  *jsonschema.Schema
+	middleware    Middleware
+	provider      ModelProvider
+	tools         []*tools.Tool
+	maxIterations int // Maximum tool execution loop iterations (default: 10, similar to LangGraph's recursion_limit)
 }
 
 // NewAgent creates a new Agent with the given name and options.
 func NewAgent(name string, opts ...Option) *Agent {
 	a := &Agent{
-		name:       name,
-		middleware: func(h Handler) Handler { return h },
+		name:          name,
+		middleware:    func(h Handler) Handler { return h },
+		maxIterations: 10, // Default max tool execution iterations
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -125,7 +138,7 @@ func (a *Agent) buildContext(ctx context.Context) (context.Context, *Session) {
 }
 
 // buildRequest builds the request for the Agent by combining system instructions and user messages.
-func (a *Agent) buildRequest(ctx context.Context, session *Session, prompt *Prompt) (*ModelRequest, error) {
+func (a *Agent) buildRequest(session *Session, prompt *Prompt) (*ModelRequest, error) {
 	req := ModelRequest{
 		Model:        a.model,
 		Tools:        a.tools,
@@ -167,7 +180,7 @@ func (a *Agent) storeOutputToState(session *Session, res *ModelResponse) error {
 // Run runs the agent with the given prompt and options, returning the response message.
 func (a *Agent) Run(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*Message, error) {
 	ctx, session := a.buildContext(ctx)
-	req, err := a.buildRequest(ctx, session, prompt)
+	req, err := a.buildRequest(session, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +191,7 @@ func (a *Agent) Run(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*
 // RunStream runs the agent with the given prompt and options, returning a streamable response.
 func (a *Agent) RunStream(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
 	ctx, session := a.buildContext(ctx)
-	req, err := a.buildRequest(ctx, session, prompt)
+	req, err := a.buildRequest(session, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -186,34 +199,188 @@ func (a *Agent) RunStream(ctx context.Context, prompt *Prompt, opts ...ModelOpti
 	return handler.Stream(ctx, prompt, opts...)
 }
 
+// extractToolCalls extracts tool calls from a message.
+func extractToolCalls(msg *Message) []*ToolCall {
+	if msg == nil {
+		return nil
+	}
+	return msg.ToolCalls
+}
+
+// executeTool executes a single tool call.
+func (a *Agent) executeTool(ctx context.Context, call *ToolCall) *Message {
+	for _, tool := range a.tools {
+		if tool.Name == call.Name {
+			result, err := tool.Handler.Handle(ctx, call.Arguments)
+			if err != nil {
+				errMsg := fmt.Sprintf("Error: %v", err)
+				call.Result = errMsg
+				return &Message{
+					Role:   RoleTool,
+					Status: StatusCompleted,
+					Parts:  []Part{TextPart{Text: errMsg}},
+					ToolCalls: []*ToolCall{{
+						ID:     call.ID,
+						Name:   call.Name,
+						Result: errMsg,
+					}},
+				}
+			}
+			call.Result = result
+			return &Message{
+				Role:   RoleTool,
+				Status: StatusCompleted,
+				Parts:  []Part{TextPart{Text: result}},
+				ToolCalls: []*ToolCall{{
+					ID:     call.ID,
+					Name:   call.Name,
+					Result: result,
+				}},
+			}
+		}
+	}
+	errMsg := ErrToolNotFound.Error()
+	call.Result = errMsg
+	return &Message{
+		Role:   RoleTool,
+		Status: StatusCompleted,
+		Parts:  []Part{TextPart{Text: errMsg}},
+		ToolCalls: []*ToolCall{{
+			ID:     call.ID,
+			Name:   call.Name,
+			Result: errMsg,
+		}},
+	}
+}
+
+// executeTools executes multiple tool calls in parallel (Eino ToolsNode pattern).
+func (a *Agent) executeTools(ctx context.Context, calls []*ToolCall) []*Message {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	results := make([]*Message, len(calls))
+	var wg sync.WaitGroup
+
+	for i, call := range calls {
+		wg.Add(1)
+		go func(idx int, tc *ToolCall) {
+			defer func() {
+				if r := recover(); r != nil {
+					// Handle panic from tool execution
+					errMsg := fmt.Sprintf("Tool execution panic: %v", r)
+					tc.Result = errMsg
+					results[idx] = &Message{
+						Role:   RoleTool,
+						Status: StatusCompleted,
+						Parts:  []Part{TextPart{Text: errMsg}},
+						ToolCalls: []*ToolCall{{
+							ID:     tc.ID,
+							Name:   tc.Name,
+							Result: errMsg,
+						}},
+					}
+				}
+				wg.Done()
+			}()
+			results[idx] = a.executeTool(ctx, tc)
+		}(i, call)
+	}
+
+	wg.Wait()
+	return results
+}
+
 // handler constructs the default handlers for Run and Stream using the provider.
 func (a *Agent) handler(session *Session, req *ModelRequest) Handler {
 	return Handler{
 		Run: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*Message, error) {
-			res, err := a.provider.Generate(ctx, req, opts...)
-			if err != nil {
-				return nil, err
-			}
-			if err := a.storeOutputToState(session, res); err != nil {
-				return nil, err
-			}
-			session.Record(a.name, prompt, res.Message)
-			return res.Message, nil
-		},
-		Stream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
-			stream, err := a.provider.NewStream(ctx, req, opts...)
-			if err != nil {
-				return nil, err
-			}
-			return NewMappedStream[*ModelResponse, *Message](stream, func(res *ModelResponse) (*Message, error) {
-				if res.Message.Status == StatusCompleted {
+			// Tool execution loop
+			for maxIter := a.maxIterations; maxIter > 0; maxIter-- {
+				res, err := a.provider.Generate(ctx, req, opts...)
+				if err != nil {
+					return nil, err
+				}
+
+				// Check for tool calls
+				toolCalls := extractToolCalls(res.Message)
+				if len(toolCalls) == 0 {
+					// No tool calls, return final result
 					if err := a.storeOutputToState(session, res); err != nil {
 						return nil, err
 					}
 					session.Record(a.name, prompt, res.Message)
+					return res.Message, nil
 				}
-				return res.Message, nil
-			}), nil
+
+				// Execute tools in parallel (Agent-level execution)
+				toolResults := a.executeTools(ctx, toolCalls)
+
+				// Append assistant message and tool results to conversation
+				req.Messages = append(req.Messages, res.Message)
+				req.Messages = append(req.Messages, toolResults...)
+			}
+
+			return nil, fmt.Errorf("%w: %d iterations", ErrMaxIterationsReached, a.maxIterations)
+		},
+		Stream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
+			pipe := NewStreamPipe[*Message]()
+			pipe.Go(func() error {
+				// Tool execution loop (similar to Run but with streaming)
+				for maxIter := a.maxIterations; maxIter > 0; maxIter-- {
+					stream, err := a.provider.NewStream(ctx, req, opts...)
+					if err != nil {
+						return err
+					}
+
+					// Accumulate final response while streaming chunks
+					var finalResponse *ModelResponse
+					for stream.Next() {
+						chunk, err := stream.Current()
+						if err != nil {
+							return err
+						}
+						// Send each chunk to user
+						pipe.Send(chunk.Message)
+
+						// Keep track of final complete response
+						if chunk.Message.Status == StatusCompleted {
+							finalResponse = chunk
+						}
+					}
+
+					// Check if we have a complete response with potential tool calls
+					if finalResponse == nil {
+						return nil // Stream ended without completion
+					}
+
+					// Check for tool calls
+					toolCalls := extractToolCalls(finalResponse.Message)
+					if len(toolCalls) == 0 {
+						// No tool calls, we're done
+						if err := a.storeOutputToState(session, finalResponse); err != nil {
+							return err
+						}
+						session.Record(a.name, prompt, finalResponse.Message)
+						return nil
+					}
+
+					// Execute tools in parallel
+					toolResults := a.executeTools(ctx, toolCalls)
+
+					// Stream tool results to user
+					for _, toolMsg := range toolResults {
+						pipe.Send(toolMsg)
+					}
+
+					// Append messages for next iteration
+					req.Messages = append(req.Messages, finalResponse.Message)
+					req.Messages = append(req.Messages, toolResults...)
+				}
+
+				return fmt.Errorf("%w: %d iterations", ErrMaxIterationsReached, a.maxIterations)
+			})
+			return pipe, nil
 		},
 	}
 }
