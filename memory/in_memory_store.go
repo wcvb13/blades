@@ -32,6 +32,7 @@ func (s *InMemoryStore) SearchMemory(ctx context.Context, query string) ([]*Memo
 		for _, word := range words {
 			if strings.Contains(strings.ToLower(m.Content.Text()), word) {
 				sets.Insert(m)
+				break
 			}
 		}
 		return true
