@@ -7,27 +7,32 @@ import (
 	"github.com/google/uuid"
 )
 
-// Task represents a single input-output pair within a session.
-type Task struct {
-	Input  *Prompt  `json:"input"`
-	Output *Message `json:"output"`
-}
-
 // Session holds the state of a flow along with a unique session ID.
 type Session struct {
-	ID    string                     `json:"id"`   // Unique identifier for the session
-	Task  generics.Map[string, Task] `json:"task"` // Agent tasks within the session
-	State State                      `json:"state"`
+	ID      string                   `json:"id"`
+	History generics.Slice[*Message] `json:"history"`
+	State   State                    `json:"state"`
+}
+
+// PutState sets a key-value pair in the session state.
+func (s *Session) PutState(key string, value any) {
+	s.State.Store(key, value)
 }
 
 // Record records the input prompt and output message under the given name.
-func (s *Session) Record(name string, input *Prompt, output *Message) {
-	s.Task.Store(name, Task{Input: input, Output: output})
+func (s *Session) Record(input []*Message, output *Message) {
+	s.History.Append(input...)
+	s.History.Append(output)
 }
 
 // NewSession creates a new Session instance with a unique ID.
 func NewSession(id string) *Session {
 	return &Session{ID: id}
+}
+
+// NewSessionID generates a new unique session ID.
+func NewSessionID() string {
+	return uuid.NewString()
 }
 
 // ctxSessionKey is an unexported type for keys defined in this package.
