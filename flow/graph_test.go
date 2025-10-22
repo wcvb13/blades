@@ -2,72 +2,159 @@ package flow
 
 import (
 	"context"
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
-
-	"github.com/go-kratos/blades"
 )
 
-// runnerStub is a minimal blades.Runner used for tests.
-type runnerStub struct{ name string }
-
-func (r *runnerStub) Name() string { return r.name }
-func (r *runnerStub) Run(ctx context.Context, in *blades.Prompt, opts ...blades.ModelOption) (*blades.Message, error) {
-	return &blades.Message{}, nil
+// appendHandler returns a handler that appends its node name to the state slice.
+func appendHandler(name string) GraphHandler[[]string] {
+	return func(ctx context.Context, state []string) ([]string, error) {
+		return append(state, name), nil
+	}
 }
-func (r *runnerStub) RunStream(ctx context.Context, in *blades.Prompt, opts ...blades.ModelOption) (blades.Streamable[*blades.Message], error) {
-	pipe := blades.NewStreamPipe[*blades.Message]()
-	pipe.Go(func() error {
-		pipe.Send(&blades.Message{})
-		return nil
+
+// errorHandler returns a handler that returns an error.
+func errorHandler(_ string) GraphHandler[[]string] {
+	return func(ctx context.Context, state []string) ([]string, error) {
+		return state, fmt.Errorf("handler error")
+	}
+}
+
+func TestGraphCompile_Validation(t *testing.T) {
+	t.Run("missing entry", func(t *testing.T) {
+		g := NewGraph[[]string]()
+		_ = g.AddNode("A", appendHandler("A"))
+		_ = g.SetFinishPoint("A")
+		if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "entry point not set") {
+			t.Fatalf("expected missing entry error, got %v", err)
+		}
 	})
-	return pipe, nil
+
+	t.Run("missing finish", func(t *testing.T) {
+		g := NewGraph[[]string]()
+		_ = g.AddNode("A", appendHandler("A"))
+		_ = g.SetEntryPoint("A")
+		if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "finish point not set") {
+			t.Fatalf("expected missing finish error, got %v", err)
+		}
+	})
+
+	t.Run("start node not found", func(t *testing.T) {
+		g := NewGraph[[]string]()
+		_ = g.AddNode("A", appendHandler("A"))
+		_ = g.SetEntryPoint("X")
+		_ = g.SetFinishPoint("A")
+		if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "start node not found") {
+			t.Fatalf("expected start node not found error, got %v", err)
+		}
+	})
+
+	t.Run("end node not found", func(t *testing.T) {
+		g := NewGraph[[]string]()
+		_ = g.AddNode("A", appendHandler("A"))
+		_ = g.SetEntryPoint("A")
+		_ = g.SetFinishPoint("X")
+		if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "end node not found") {
+			t.Fatalf("expected end node not found error, got %v", err)
+		}
+	})
+
+	t.Run("edge from unknown node", func(t *testing.T) {
+		g := NewGraph[[]string]()
+		_ = g.AddNode("A", appendHandler("A"))
+		_ = g.AddEdge("X", "A")
+		_ = g.SetEntryPoint("A")
+		_ = g.SetFinishPoint("A")
+		if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "edge from unknown node") {
+			t.Fatalf("expected edge from unknown node error, got %v", err)
+		}
+	})
+
+	t.Run("edge to unknown node", func(t *testing.T) {
+		g := NewGraph[[]string]()
+		_ = g.AddNode("A", appendHandler("A"))
+		_ = g.AddEdge("A", "X")
+		_ = g.SetEntryPoint("A")
+		_ = g.SetFinishPoint("A")
+		if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "edge to unknown node") {
+			t.Fatalf("expected edge to unknown node error, got %v", err)
+		}
+	})
+
+	t.Run("cycle detection", func(t *testing.T) {
+		g := NewGraph[[]string]()
+		_ = g.AddNode("A", appendHandler("A"))
+		_ = g.AddNode("B", appendHandler("B"))
+		_ = g.AddNode("C", appendHandler("C"))
+		_ = g.AddEdge("A", "B")
+		_ = g.AddEdge("B", "C")
+		_ = g.AddEdge("C", "A")
+		_ = g.SetEntryPoint("A")
+		_ = g.SetFinishPoint("C")
+		if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "cycle detected") {
+			t.Fatalf("expected cycle detected error, got %v", err)
+		}
+	})
 }
 
-func TestGraph_LinearChain(t *testing.T) {
-	a := &runnerStub{name: "A"}
-	b := &runnerStub{name: "B"}
-	c := &runnerStub{name: "C"}
-
-	g := NewGraph("test")
-	if err := g.AddNode(a); err != nil {
-		t.Fatalf("AddNode A error: %v", err)
-	}
-	if err := g.AddNode(b); err != nil {
-		t.Fatalf("AddNode B error: %v", err)
-	}
-	if err := g.AddNode(c); err != nil {
-		t.Fatalf("AddNode C error: %v", err)
-	}
-	if err := g.AddStart(a); err != nil {
-		t.Fatalf("AddStart error: %v", err)
-	}
-	if err := g.AddEdge(a, b); err != nil {
-		t.Fatalf("AddEdge A->B error: %v", err)
-	}
-	if err := g.AddEdge(b, c); err != nil {
-		t.Fatalf("AddEdge B->C error: %v", err)
-	}
-
-	runner, err := g.Compile()
+func TestGraph_Run_BFSOrder(t *testing.T) {
+	g := NewGraph[[]string]()
+	_ = g.AddNode("A", appendHandler("A"))
+	_ = g.AddNode("B", appendHandler("B"))
+	_ = g.AddNode("C", appendHandler("C"))
+	_ = g.AddNode("D", appendHandler("D"))
+	_ = g.AddEdge("A", "B")
+	_ = g.AddEdge("A", "C")
+	_ = g.AddEdge("B", "D")
+	_ = g.AddEdge("C", "D")
+	_ = g.SetEntryPoint("A")
+	_ = g.SetFinishPoint("D")
+	handler, err := g.Compile()
 	if err != nil {
 		t.Fatalf("compile error: %v", err)
 	}
+	got, err := handler(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	want := []string{"A", "B", "C", "D"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected order: got %v, want %v", got, want)
+	}
+}
 
-	gr, ok := runner.(*graphRunner)
-	if !ok {
-		t.Fatalf("expected *graphRunner, got %T", runner)
+func TestGraph_ErrorPropagation(t *testing.T) {
+	g := NewGraph[[]string]()
+	_ = g.AddNode("A", appendHandler("A"))
+	_ = g.AddNode("B", errorHandler("B"))
+	_ = g.AddEdge("A", "B")
+	_ = g.SetEntryPoint("A")
+	_ = g.SetFinishPoint("B")
+	handler, err := g.Compile()
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
 	}
-	queue, ok := gr.compiled["A"]
-	if !ok {
-		t.Fatalf("compiled missing start A")
+	got, err := handler(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "node B") {
+		t.Fatalf("expected error from node B, got %v", err)
 	}
-	if len(queue) != 3 {
-		t.Fatalf("expected 3 nodes in compiled queue, got %d", len(queue))
+	want := []string{"A"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected state on error: got %v, want %v", got, want)
 	}
-	want := []string{"A", "B", "C"}
-	for i, n := range queue {
-		if n.name != want[i] {
-			t.Fatalf("at position %d want %s, got %s", i, want[i], n.name)
-		}
+}
+
+func TestGraph_FinishUnreachable(t *testing.T) {
+	g := NewGraph[[]string]()
+	_ = g.AddNode("A", appendHandler("A"))
+	_ = g.AddNode("B", appendHandler("B"))
+	_ = g.AddNode("D", appendHandler("D"))
+	_ = g.AddEdge("A", "B")
+	_ = g.SetEntryPoint("A")
+	_ = g.SetFinishPoint("D")
+	if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "finish node not reachable") {
+		t.Fatalf("expected finish not reachable error, got %v", err)
 	}
 }
