@@ -2,9 +2,11 @@ package blades
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/go-kratos/blades/tools"
 	"github.com/google/jsonschema-go/jsonschema"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -91,6 +93,14 @@ func WithStateOutputHandler(h StateOutputHandler) Option {
 	}
 }
 
+// WithMaxIterations sets the maximum number of iterations for the Agent.
+// By default, it is set to 10.
+func WithMaxIterations(n int) Option {
+	return func(a *Agent) {
+		a.maxIterations = n
+	}
+}
+
 // Agent is a struct that represents an AI agent.
 type Agent struct {
 	name          string
@@ -98,6 +108,7 @@ type Agent struct {
 	description   string
 	instructions  string
 	outputKey     string
+	maxIterations int
 	inputSchema   *jsonschema.Schema
 	outputSchema  *jsonschema.Schema
 	inputHandler  StateInputHandler
@@ -110,8 +121,9 @@ type Agent struct {
 // NewAgent creates a new Agent with the given name and options.
 func NewAgent(name string, opts ...Option) *Agent {
 	a := &Agent{
-		name:       name,
-		middleware: func(h Runnable) Runnable { return h },
+		name:          name,
+		maxIterations: 10,
+		middleware:    func(h Runnable) Runnable { return h },
 		inputHandler: func(ctx context.Context, prompt *Prompt, state *State) (*Prompt, error) {
 			return prompt, nil
 		},
@@ -216,34 +228,112 @@ func (a *Agent) storeOutputToState(session *Session, res *ModelResponse) error {
 	return nil
 }
 
+func (a *Agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error) {
+	for _, tool := range a.tools {
+		if tool.Name == part.Name {
+			response, err := tool.Handler.Handle(ctx, part.Request)
+			if err != nil {
+				return part, err
+			}
+			part.Response = response
+			return part, nil
+		}
+	}
+	return part, fmt.Errorf("tool %s not found", part.Name)
+}
+
+// executeTools executes the tools specified in the tool parts.
+func (a *Agent) executeTools(ctx context.Context, message *Message) (*Message, error) {
+	toolMessage := &Message{ID: message.ID, Role: message.Role, Parts: message.Parts}
+	eg, ctx := errgroup.WithContext(ctx)
+	for i, part := range message.Parts {
+		i := i
+		switch v := any(part).(type) {
+		case ToolPart:
+			eg.Go(func() error {
+				part, err := a.handleTools(ctx, v)
+				if err != nil {
+					return err
+				}
+				toolMessage.Parts[i] = part
+				return nil
+			})
+		}
+	}
+	return toolMessage, eg.Wait()
+}
+
 // handler constructs the default handlers for Run and Stream using the provider.
 func (a *Agent) handler(session *Session, req *ModelRequest) Runnable {
 	return &HandleFunc{
 		Handle: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*Message, error) {
-			res, err := a.provider.Generate(ctx, req, opts...)
-			if err != nil {
-				return nil, err
-			}
-			if err := a.storeOutputToState(session, res); err != nil {
-				return nil, err
-			}
-			session.Record(req.Messages, res.Message)
-			return a.outputHandler(ctx, res.Message, &session.State)
-		},
-		HandleStream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
-			stream, err := a.provider.NewStream(ctx, req, opts...)
-			if err != nil {
-				return nil, err
-			}
-			return NewMappedStream[*ModelResponse, *Message](stream, func(res *ModelResponse) (*Message, error) {
-				if res.Message.Status == StatusCompleted {
-					if err := a.storeOutputToState(session, res); err != nil {
+			for i := 0; i < a.maxIterations; i++ {
+				res, err := a.provider.Generate(ctx, req, opts...)
+				if err != nil {
+					return nil, err
+				}
+				if res.Message.Role == RoleTool {
+					toolMessage, err := a.executeTools(ctx, res.Message)
+					if err != nil {
 						return nil, err
 					}
-					session.Record(req.Messages, res.Message)
+					req.Messages = append(req.Messages, toolMessage)
+					continue // continue to the next iteration
 				}
+				if err := a.storeOutputToState(session, res); err != nil {
+					return nil, err
+				}
+				session.Record(req.Messages, res.Message)
 				return a.outputHandler(ctx, res.Message, &session.State)
-			}), nil
+			}
+			return nil, ErrMaxIterationsExceeded
+		},
+		HandleStream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
+			pipe := NewStreamPipe[*Message]()
+			pipe.Go(func() error {
+				for i := 0; i < a.maxIterations; i++ {
+					stream, err := a.provider.NewStream(ctx, req, opts...)
+					if err != nil {
+						return err
+					}
+					var finalResponse *ModelResponse
+					for stream.Next() {
+						chunk, err := stream.Current()
+						if err != nil {
+							return err
+						}
+						if chunk.Message.Status == StatusCompleted {
+							finalResponse = chunk
+						} else {
+							pipe.Send(chunk.Message)
+						}
+					}
+					if finalResponse == nil {
+						return ErrMissingFinalResponse
+					}
+					if finalResponse.Message.Role == RoleTool {
+						toolMessage, err := a.executeTools(ctx, finalResponse.Message)
+						if err != nil {
+							return err
+						}
+						req.Messages = append(req.Messages, toolMessage)
+						continue // continue to the next iteration
+					}
+					if err := a.storeOutputToState(session, finalResponse); err != nil {
+						return err
+					}
+					session.Record(req.Messages, finalResponse.Message)
+					// handle the final response before sending
+					finalResponse.Message, err = a.outputHandler(ctx, finalResponse.Message, &session.State)
+					if err != nil {
+						return err
+					}
+					pipe.Send(finalResponse.Message)
+					return nil
+				}
+				return ErrMaxIterationsExceeded
+			})
+			return pipe, nil
 		},
 	}
 }
