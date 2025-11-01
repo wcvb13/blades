@@ -76,7 +76,7 @@ func (p *ChatProvider) Generate(ctx context.Context, req *blades.ModelRequest, o
 	if err != nil {
 		return nil, err
 	}
-	res, err := choiceToResponse(ctx, params, chatResponse.Choices)
+	res, err := choiceToResponse(ctx, params, chatResponse)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (p *ChatProvider) NewStream(ctx context.Context, req *blades.ModelRequest, 
 			}
 			pipe.Send(res)
 		}
-		finalResponse, err := choiceToResponse(ctx, params, acc.ChatCompletion.Choices)
+		finalResponse, err := choiceToResponse(ctx, params, &acc.ChatCompletion)
 		if err != nil {
 			return err
 		}
@@ -329,14 +329,18 @@ func choiceToToolCalls(ctx context.Context, tools []*tools.Tool, choices []opena
 }
 
 // choiceToResponse converts a non-streaming choice to a ModelResponse.
-func choiceToResponse(ctx context.Context, params openai.ChatCompletionNewParams, choices []openai.ChatCompletionChoice) (*blades.ModelResponse, error) {
+func choiceToResponse(ctx context.Context, params openai.ChatCompletionNewParams, cc *openai.ChatCompletion) (*blades.ModelResponse, error) {
 	msg := &blades.Message{
-		Role:     blades.RoleAssistant,
-		Status:   blades.StatusCompleted,
+		Role:   blades.RoleAssistant,
+		Status: blades.StatusCompleted,
+		TokenUsage: blades.TokenUsage{
+			PromptTokens:     cc.Usage.PromptTokens,
+			CompletionTokens: cc.Usage.CompletionTokens,
+			TotalTokens:      cc.Usage.TotalTokens,
+		},
 		Metadata: map[string]string{},
 	}
-
-	for _, choice := range choices {
+	for _, choice := range cc.Choices {
 		if choice.Message.Content != "" {
 			msg.Parts = append(msg.Parts, blades.TextPart{Text: choice.Message.Content})
 		}
@@ -348,10 +352,10 @@ func choiceToResponse(ctx context.Context, params openai.ChatCompletionNewParams
 			msg.Parts = append(msg.Parts, blades.DataPart{Bytes: bytes})
 		}
 		if choice.Message.Refusal != "" {
-			msg.Metadata["refusal"] = choice.Message.Refusal
+			msg.Refusal = choice.Message.Refusal
 		}
 		if choice.FinishReason != "" {
-			msg.Metadata["finish_reason"] = choice.FinishReason
+			msg.FinishReason = choice.FinishReason
 		}
 		for _, call := range choice.Message.ToolCalls {
 			msg.Role = blades.RoleTool
