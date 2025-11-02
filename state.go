@@ -4,25 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
-	"github.com/go-kratos/generics"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // State holds arbitrary key-value pairs representing the state.
-type State = generics.Map[string, any]
+type State map[string]any
+
+// Clone creates a deep copy of the State.
+func (s State) Clone() State {
+	return State(maps.Clone(map[string]any(s)))
+}
 
 // StateInputHandler is a function type that processes input prompts with access to the current state.
-type StateInputHandler func(ctx context.Context, input *Prompt, state *State) (*Prompt, error)
+type StateInputHandler func(ctx context.Context, input *Prompt, state State) (*Prompt, error)
 
 // StateOutputHandler is a function type that processes output messages with access to the current state.
-type StateOutputHandler func(ctx context.Context, output *Message, state *State) (*Message, error)
+type StateOutputHandler func(ctx context.Context, output *Message, state State) (*Message, error)
 
 // StateInputEmpty returns a StateInputHandler that returns an empty Prompt.
 func StateInputEmpty() StateInputHandler {
-	return func(ctx context.Context, input *Prompt, state *State) (*Prompt, error) {
+	return func(ctx context.Context, input *Prompt, state State) (*Prompt, error) {
 		return NewPrompt(), nil
 	}
 }
