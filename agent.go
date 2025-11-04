@@ -72,6 +72,15 @@ func WithTools(tools ...*tools.Tool) Option {
 	}
 }
 
+// WithToolsResolver sets a tools resolver for the Agent.
+// The resolver can dynamically provide tools from various sources (e.g., MCP servers, plugins).
+// Tools are resolved lazily on first use.
+func WithToolsResolver(r tools.Resolver) Option {
+	return func(a *Agent) {
+		a.toolsResolver = r
+	}
+}
+
 // WithMiddleware sets the middleware for the Agent.
 func WithMiddleware(ms ...Middleware) Option {
 	return func(a *Agent) {
@@ -116,6 +125,7 @@ type Agent struct {
 	middlewares   []Middleware
 	provider      ModelProvider
 	tools         []*tools.Tool
+	toolsResolver tools.Resolver // Optional resolver for dynamic tools (e.g., MCP servers)
 }
 
 // NewAgent creates a new Agent with the given name and options.
@@ -157,11 +167,32 @@ func (a *Agent) buildContext(ctx context.Context) (context.Context, Session) {
 	}), session
 }
 
+// resolveTools combines static tools with dynamically resolved tools.
+func (a *Agent) resolveTools(ctx context.Context) ([]*tools.Tool, error) {
+	allTools := make([]*tools.Tool, 0, len(a.tools))
+	allTools = append(allTools, a.tools...)
+
+	if a.toolsResolver != nil {
+		resolved, err := a.toolsResolver.Resolve(ctx)
+		if err != nil {
+			return nil, err
+		}
+		allTools = append(allTools, resolved...)
+	}
+
+	return allTools, nil
+}
+
 // buildRequest builds the request for the Agent by combining system instructions and user messages.
-func (a *Agent) buildRequest(ctx context.Context, session Session, prompt *Prompt) (*ModelRequest, error) {
+func (a *Agent) buildRequest(ctx context.Context, _ Session, prompt *Prompt) (*ModelRequest, error) {
+	allTools, err := a.resolveTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	req := ModelRequest{
 		Model:        a.model,
-		Tools:        a.tools,
+		Tools:        allTools,
 		InputSchema:  a.inputSchema,
 		OutputSchema: a.outputSchema,
 	}
@@ -229,7 +260,13 @@ func (a *Agent) storeSession(ctx context.Context, session Session, prompt *Promp
 }
 
 func (a *Agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error) {
-	for _, tool := range a.tools {
+	allTools, err := a.resolveTools(ctx)
+	if err != nil {
+		return part, err
+	}
+
+	// Search through all available tools (static + resolved)
+	for _, tool := range allTools {
 		if tool.Name == part.Name {
 			response, err := tool.Handler.Handle(ctx, part.Request)
 			if err != nil {
