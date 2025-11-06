@@ -110,6 +110,25 @@ func TestGraphCompileRejectsCyclesInDisconnectedComponent(t *testing.T) {
 	}
 }
 
+func TestGraphCompileRejectsDanglingNode(t *testing.T) {
+	g := NewGraph()
+
+	_ = g.AddNode("start", stepHandler("start"))
+	_ = g.AddNode("mid", stepHandler("mid"))
+	_ = g.AddNode("finish", stepHandler("finish"))
+	_ = g.AddEdge("start", "mid")
+	_ = g.AddEdge("mid", "finish")
+	// Add dangling node without outgoing edges
+	_ = g.AddNode("orphan", stepHandler("orphan"))
+
+	_ = g.SetEntryPoint("start")
+	_ = g.SetFinishPoint("finish")
+
+	if _, err := g.Compile(); err == nil || !strings.Contains(err.Error(), "has no outgoing edges") {
+		t.Fatalf("expected dangling node validation error, got %v", err)
+	}
+}
+
 func TestGraphSequentialOrder(t *testing.T) {
 	g := NewGraph(WithParallel(false))
 	execOrder := make([]string, 0, 4)
@@ -184,7 +203,11 @@ func TestGraphConditionalRouting(t *testing.T) {
 		steps, _ := state[stepsKey].([]string)
 		return len(steps) == 2 && steps[1] == "B"
 	}))
-	_ = g.AddEdge("B", "D")
+	_ = g.AddEdge("B", "D", WithEdgeCondition(func(_ context.Context, state State) bool {
+		steps, _ := state[stepsKey].([]string)
+		return !(len(steps) == 2 && steps[1] == "B")
+	}))
+	_ = g.AddEdge("D", "C") // D also needs to eventually reach C (the finish point)
 
 	_ = g.SetEntryPoint("A")
 	_ = g.SetFinishPoint("C")
@@ -242,7 +265,10 @@ func TestGraphConditionalMixedPrecedence(t *testing.T) {
 	_ = g.AddEdge("decision", "second", WithEdgeCondition(func(_ context.Context, state State) bool {
 		return true
 	}))
-	_ = g.AddEdge("decision", "fallback")
+	// Changed: fallback is now conditional (when both first and second are false)
+	_ = g.AddEdge("decision", "fallback", WithEdgeCondition(func(_ context.Context, state State) bool {
+		return false // Only execute if first=false AND second=false (which is false here)
+	}))
 	_ = g.AddEdge("first", "finish")
 	_ = g.AddEdge("second", "finish")
 	_ = g.AddEdge("fallback", "finish")
@@ -296,7 +322,9 @@ func TestGraphConditionalUnconditionalOrder(t *testing.T) {
 	g.AddNode("conditional", record("conditional", nil))
 	g.AddNode("join", record("join", nil))
 
-	g.AddEdge("start", "always")
+	g.AddEdge("start", "always", WithEdgeCondition(func(_ context.Context, state State) bool {
+		return true // Always execute
+	}))
 	g.AddEdge("start", "conditional", WithEdgeCondition(func(_ context.Context, state State) bool {
 		allow, _ := state["allow_conditional"].(bool)
 		return allow
@@ -318,6 +346,65 @@ func TestGraphConditionalUnconditionalOrder(t *testing.T) {
 
 	if executed["conditional"] == 0 {
 		t.Fatalf("expected conditional branch to execute when condition true, executed=%v", executed)
+	}
+}
+
+func TestGraphParallelDoesNotStallIndependentBranches(t *testing.T) {
+	g := NewGraph()
+
+	var mu sync.Mutex
+	execTime := make(map[string]time.Time)
+	record := func(name string, fn func()) Handler {
+		return func(ctx context.Context, state State) (State, error) {
+			if fn != nil {
+				fn()
+			}
+			now := time.Now()
+			mu.Lock()
+			execTime[name] = now
+			mu.Unlock()
+			return state.Clone(), nil
+		}
+	}
+
+	g.AddNode("start", record("start", nil))
+	g.AddNode("fast", record("fast", nil))
+	g.AddNode("slow", record("slow", func() {
+		time.Sleep(200 * time.Millisecond)
+	}))
+	g.AddNode("downstream", record("downstream", nil))
+	g.AddNode("finish", record("finish", nil))
+
+	g.AddEdge("start", "fast")
+	g.AddEdge("start", "slow")
+	g.AddEdge("fast", "downstream")
+	g.AddEdge("downstream", "finish")
+	g.AddEdge("slow", "finish")
+
+	g.SetEntryPoint("start")
+	g.SetFinishPoint("finish")
+
+	executor, err := g.Compile()
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := executor.Execute(context.Background(), State{}); err != nil {
+		t.Fatalf("execution error: %v", err)
+	}
+
+	mu.Lock()
+	downstreamTime := execTime["downstream"]
+	slowTime := execTime["slow"]
+	mu.Unlock()
+
+	if downstreamTime.IsZero() || slowTime.IsZero() {
+		t.Fatalf("expected both downstream and slow nodes to execute, times=%v", execTime)
+	}
+
+	if !downstreamTime.Before(slowTime) {
+		t.Fatalf("expected downstream branch to execute before slow sibling finished; downstream=%v slow=%v elapsed=%v", downstreamTime, slowTime, slowTime.Sub(start))
 	}
 }
 
@@ -826,7 +913,9 @@ func TestGraphParallelJoinIgnoresInactiveBranches(t *testing.T) {
 	g.AddNode("branch_b", record("branch_b", nil))
 	g.AddNode("join", record("join", nil))
 
-	g.AddEdge("start", "branch_a")
+	g.AddEdge("start", "branch_a", WithEdgeCondition(func(_ context.Context, state State) bool {
+		return true // Always execute
+	}))
 	g.AddEdge("start", "branch_b", WithEdgeCondition(func(_ context.Context, state State) bool {
 		enabled, _ := state["enable_b"].(bool)
 		return enabled
@@ -2326,7 +2415,7 @@ func TestGraphLargeScaleDAG(t *testing.T) {
 func TestGraphSerialWithConditionalRouting(t *testing.T) {
 	// Tests serial mode with conditional branches that converge
 	// Graph topology:
-	// start → check → [priority_high (cond) OR priority_low (fallback)] → process → final
+	// start → check → [priority_high (cond) OR priority_low (cond: !useHigh)] → process → final
 	g := NewGraph(WithParallel(false))
 
 	var mu sync.Mutex
@@ -2353,13 +2442,17 @@ func TestGraphSerialWithConditionalRouting(t *testing.T) {
 	g.AddNode("final", record("final"))
 
 	g.AddEdge("start", "check")
-	// Conditional edge first, then fallback
+	// Conditional edge first
 	g.AddEdge("check", "priority_high", WithEdgeCondition(func(_ context.Context, state State) bool {
 		useHigh, _ := state["use_high"].(bool)
 		t.Logf("Condition check: use_high=%v", useHigh)
 		return useHigh
 	}))
-	g.AddEdge("check", "priority_low") // unconditional fallback
+	// Changed: priority_low is now conditional (!useHigh) instead of unconditional fallback
+	g.AddEdge("check", "priority_low", WithEdgeCondition(func(_ context.Context, state State) bool {
+		useHigh, _ := state["use_high"].(bool)
+		return !useHigh
+	}))
 
 	g.AddEdge("priority_high", "process")
 	g.AddEdge("priority_low", "process")
@@ -2396,7 +2489,7 @@ func TestGraphSerialWithConditionalRouting(t *testing.T) {
 		}
 	})
 
-	// Test low priority path (fallback)
+	// Test low priority path
 	t.Run("low priority path", func(t *testing.T) {
 		mu.Lock()
 		executionOrder = make([]string, 0)
