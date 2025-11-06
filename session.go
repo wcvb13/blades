@@ -16,9 +16,9 @@ type Session interface {
 	Append(context.Context, State, []*Message) error
 }
 
-// NewSession creates a new Session instance with the provided ID.
-func NewSession(id string, states ...map[string]any) Session {
-	session := &sessionInMemory{id: id, state: State{}}
+// NewSession creates a new Session instance with an auto-generated UUID and optional initial state maps.
+func NewSession(states ...map[string]any) Session {
+	session := &sessionInMemory{id: uuid.NewString(), state: State{}}
 	for _, state := range states {
 		for k, v := range state {
 			session.state[k] = v
@@ -27,28 +27,13 @@ func NewSession(id string, states ...map[string]any) Session {
 	return session
 }
 
-// ctxSessionKey is an unexported type for keys defined in this package.
-type ctxSessionKey struct{}
-
-// NewSessionContext returns a new Context that carries value.
-func NewSessionContext(ctx context.Context, session Session) context.Context {
-	return context.WithValue(ctx, ctxSessionKey{}, session)
-}
-
 // FromSessionContext retrieves the SessionContext from the context.
 func FromSessionContext(ctx context.Context) (Session, bool) {
-	session, ok := ctx.Value(ctxSessionKey{}).(Session)
-	return session, ok
-}
-
-// EnsureSession retrieves the SessionContext from the context, or creates a new one if it doesn't exist.
-func EnsureSession(ctx context.Context) (Session, context.Context) {
-	session, ok := FromSessionContext(ctx)
+	invocation, ok := FromInvocationContext(ctx)
 	if !ok {
-		session = NewSession(uuid.NewString())
-		ctx = NewSessionContext(ctx, session)
+		return nil, false
 	}
-	return session, ctx
+	return invocation.Session, true
 }
 
 // sessionInMemory is an in-memory implementation of the Session interface.

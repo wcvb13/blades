@@ -156,15 +156,15 @@ func (a *Agent) Description() string {
 	return a.description
 }
 
-// buildContext builds the context for the Agent by embedding the AgentContext.
-func (a *Agent) buildContext(ctx context.Context) (context.Context, Session) {
-	session, ctx := EnsureSession(ctx)
+// buildInvocationContext builds the context for the Agent by embedding the AgentContext.
+func (a *Agent) buildInvocationContext(ctx context.Context) (context.Context, *InvocationContext) {
+	invocation, ctx := EnsureInvocationContext(ctx)
 	return NewContext(ctx, &AgentContext{
 		Name:         a.name,
 		Model:        a.model,
 		Description:  a.description,
 		Instructions: a.instructions,
-	}), session
+	}), invocation
 }
 
 // resolveTools combines static tools with dynamically resolved tools.
@@ -184,12 +184,11 @@ func (a *Agent) resolveTools(ctx context.Context) ([]*tools.Tool, error) {
 }
 
 // buildRequest builds the request for the Agent by combining system instructions and user messages.
-func (a *Agent) buildRequest(ctx context.Context, _ Session, prompt *Prompt) (*ModelRequest, error) {
+func (a *Agent) buildRequest(ctx context.Context, prompt *Prompt) (*ModelRequest, error) {
 	tools, err := a.resolveTools(ctx)
 	if err != nil {
 		return nil, err
 	}
-
 	req := ModelRequest{
 		Model:        a.model,
 		Tools:        tools,
@@ -213,51 +212,66 @@ func (a *Agent) buildRequest(ctx context.Context, _ Session, prompt *Prompt) (*M
 
 // Run runs the agent with the given prompt and options, returning the response message.
 func (a *Agent) Run(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*Message, error) {
-	ctx, session := a.buildContext(ctx)
-	input, err := a.inputHandler(ctx, prompt, session.State())
+	ctx, invocation := a.buildInvocationContext(ctx)
+	input, err := a.inputHandler(ctx, prompt, invocation.Session.State())
 	if err != nil {
 		return nil, err
 	}
-	req, err := a.buildRequest(ctx, session, input)
+	req, err := a.buildRequest(ctx, input)
 	if err != nil {
 		return nil, err
 	}
-	handler := a.handler(session, req)
+	handler := a.handler(invocation, req)
 	return handler.Run(ctx, prompt, opts...)
 }
 
 // RunStream runs the agent with the given prompt and options, returning a streamable response.
 func (a *Agent) RunStream(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
-	ctx, session := a.buildContext(ctx)
-	input, err := a.inputHandler(ctx, prompt, session.State())
+	ctx, invocation := a.buildInvocationContext(ctx)
+	input, err := a.inputHandler(ctx, prompt, invocation.Session.State())
 	if err != nil {
 		return nil, err
 	}
-	req, err := a.buildRequest(ctx, session, input)
+	req, err := a.buildRequest(ctx, input)
 	if err != nil {
 		return nil, err
 	}
-	handler := a.handler(session, req)
+	handler := a.handler(invocation, req)
 	return handler.RunStream(ctx, prompt, opts...)
 }
 
-// storeOutputToState stores the output of the Agent to the session state if an output key is defined.
-func (a *Agent) storeSession(ctx context.Context, session Session, userMessages, toolMessages []*Message, assistantMessage *Message) error {
-	state := State{}
-	if a.outputSchema != nil {
-		value, err := ParseMessageState(assistantMessage, a.outputSchema)
-		if err != nil {
-			return err
-		}
-		state[a.outputKey] = value
-	} else {
-		state[a.outputKey] = assistantMessage.Text()
+func (a *Agent) findResumeMessage(ctx context.Context, invocation *InvocationContext) (*Message, bool) {
+	if !invocation.Resumable {
+		return nil, false
 	}
-	stores := make([]*Message, len(userMessages)+len(toolMessages)+1)
-	stores = append(stores, userMessages...)
-	stores = append(stores, toolMessages...)
-	stores = append(stores, assistantMessage)
-	return session.Append(ctx, state, stores)
+	for _, m := range invocation.Session.History() {
+		if m.InvocationID == invocation.InvocationID &&
+			m.Author == a.name && m.Role == RoleAssistant && m.Status == StatusCompleted {
+			return m, true
+		}
+	}
+	return nil, false
+}
+
+// storeSession stores the agent's output to session state (if outputKey is defined) and appends messages to session history.
+func (a *Agent) storeSession(ctx context.Context, invocation *InvocationContext, userMessages, toolMessages []*Message, assistantMessage *Message) error {
+	state := State{}
+	if a.outputKey != "" {
+		if a.outputSchema != nil {
+			value, err := ParseMessageState(assistantMessage, a.outputSchema)
+			if err != nil {
+				return err
+			}
+			state[a.outputKey] = value
+		} else {
+			state[a.outputKey] = assistantMessage.Text()
+		}
+	}
+	stores := make([]*Message, 0, len(userMessages)+len(toolMessages)+1)
+	stores = append(stores, setMessageContext("user", invocation.InvocationID, userMessages...)...)
+	stores = append(stores, setMessageContext(a.name, invocation.InvocationID, toolMessages...)...)
+	stores = append(stores, setMessageContext(a.name, invocation.InvocationID, assistantMessage)...)
+	return invocation.Session.Append(ctx, state, stores)
 }
 
 func (a *Agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error) {
@@ -301,9 +315,13 @@ func (a *Agent) executeTools(ctx context.Context, message *Message) (*Message, e
 }
 
 // handler constructs the default handlers for Run and Stream using the provider.
-func (a *Agent) handler(session Session, req *ModelRequest) Runnable {
+func (a *Agent) handler(invocation *InvocationContext, req *ModelRequest) Runnable {
 	handler := Runnable(&HandleFunc{
 		Handle: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*Message, error) {
+			// find resume message
+			if message, ok := a.findResumeMessage(ctx, invocation); ok {
+				return message, nil
+			}
 			var toolMessages []*Message
 			for i := 0; i < a.maxIterations; i++ {
 				res, err := a.provider.Generate(ctx, req, opts...)
@@ -319,16 +337,25 @@ func (a *Agent) handler(session Session, req *ModelRequest) Runnable {
 					toolMessages = append(toolMessages, toolMessage)
 					continue // continue to the next iteration
 				}
-				if err := a.storeSession(ctx, session, prompt.Messages, toolMessages, res.Message); err != nil {
+				output, err := a.outputHandler(ctx, res.Message, invocation.Session.State())
+				if err != nil {
 					return nil, err
 				}
-				return a.outputHandler(ctx, res.Message, session.State())
+				if err := a.storeSession(ctx, invocation, prompt.Messages, toolMessages, output); err != nil {
+					return nil, err
+				}
+				return output, nil
 			}
 			return nil, ErrMaxIterationsExceeded
 		},
 		HandleStream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
 			pipe := NewStreamPipe[*Message]()
 			pipe.Go(func() error {
+				// find resume message
+				if message, ok := a.findResumeMessage(ctx, invocation); ok {
+					pipe.Send(message)
+					return nil
+				}
 				var toolMessages []*Message
 				for i := 0; i < a.maxIterations; i++ {
 					stream, err := a.provider.NewStream(ctx, req, opts...)
@@ -359,12 +386,12 @@ func (a *Agent) handler(session Session, req *ModelRequest) Runnable {
 						toolMessages = append(toolMessages, toolMessage)
 						continue // continue to the next iteration
 					}
-					if err := a.storeSession(ctx, session, prompt.Messages, toolMessages, finalResponse.Message); err != nil {
+					// handle the final response before sending
+					finalResponse.Message, err = a.outputHandler(ctx, finalResponse.Message, invocation.Session.State())
+					if err != nil {
 						return err
 					}
-					// handle the final response before sending
-					finalResponse.Message, err = a.outputHandler(ctx, finalResponse.Message, session.State())
-					if err != nil {
+					if err := a.storeSession(ctx, invocation, prompt.Messages, toolMessages, finalResponse.Message); err != nil {
 						return err
 					}
 					pipe.Send(finalResponse.Message)
