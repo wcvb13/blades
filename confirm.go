@@ -2,6 +2,7 @@ package blades
 
 import (
 	"context"
+	"iter"
 )
 
 // ConfirmFunc is a callback used by the confirmation middleware
@@ -35,7 +36,7 @@ func (m *confirmMiddleware) Run(ctx context.Context, p *Prompt, opts ...ModelOpt
 	return m.next.Run(ctx, p, opts...)
 }
 
-func (m *confirmMiddleware) RunStream(ctx context.Context, p *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
+func (m *confirmMiddleware) RunStream(ctx context.Context, p *Prompt, opts ...ModelOption) (iter.Seq2[*Message, error], error) {
 	ok, err := m.confirm(ctx, p)
 	if err != nil {
 		return nil, err

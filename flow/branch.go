@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/go-kratos/blades"
+	"github.com/go-kratos/blades/stream"
 )
 
 // BranchCondition is a function that selects a branch name based on the context.
@@ -42,15 +43,13 @@ func (c *Branch) Run(ctx context.Context, input *blades.Prompt, opts ...blades.M
 }
 
 // RunStream executes the selected runner based on the selector function and streams its output.
-func (c *Branch) RunStream(ctx context.Context, input *blades.Prompt, opts ...blades.ModelOption) (blades.Streamable[*blades.Message], error) {
-	pipe := blades.NewStreamPipe[*blades.Message]()
-	pipe.Go(func() error {
-		output, err := c.Run(ctx, input, opts...)
+func (c *Branch) RunStream(ctx context.Context, input *blades.Prompt, opts ...blades.ModelOption) (stream.Streamable[*blades.Message], error) {
+	return stream.Go(func(yield func(*blades.Message, error) bool) {
+		message, err := c.Run(ctx, input, opts...)
 		if err != nil {
-			return err
+			yield(nil, err)
+			return
 		}
-		pipe.Send(output)
-		return nil
-	})
-	return pipe, nil
+		yield(message, nil)
+	}), nil
 }

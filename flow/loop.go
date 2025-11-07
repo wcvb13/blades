@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-kratos/blades"
+	"github.com/go-kratos/blades/stream"
 )
 
 // LoopOption defines a function type for configuring Loop instances.
@@ -60,16 +61,14 @@ func (l *Loop) Run(ctx context.Context, input *blades.Prompt, opts ...blades.Mod
 	return output, nil
 }
 
-// RunStream executes the Loop in a streaming manner, returning a Streamable that emits the final output.
-func (l *Loop) RunStream(ctx context.Context, input *blades.Prompt, opts ...blades.ModelOption) (blades.Streamable[*blades.Message], error) {
-	pipe := blades.NewStreamPipe[*blades.Message]()
-	pipe.Go(func() error {
-		output, err := l.Run(ctx, input, opts...)
+// RunStream executes the Loop in a streaming manner, returning a Streamable that yields the final output.
+func (l *Loop) RunStream(ctx context.Context, input *blades.Prompt, opts ...blades.ModelOption) (stream.Streamable[*blades.Message], error) {
+	return stream.Go(func(yield func(*blades.Message, error) bool) {
+		message, err := l.Run(ctx, input, opts...)
 		if err != nil {
-			return err
+			yield(nil, err)
+			return
 		}
-		pipe.Send(output)
-		return nil
-	})
-	return pipe, nil
+		yield(message, nil)
+	}), nil
 }

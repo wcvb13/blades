@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/go-kratos/blades/stream"
 	"github.com/go-kratos/blades/tools"
 	"github.com/google/jsonschema-go/jsonschema"
 	"golang.org/x/sync/errgroup"
@@ -226,7 +227,7 @@ func (a *Agent) Run(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*
 }
 
 // RunStream runs the agent with the given prompt and options, returning a streamable response.
-func (a *Agent) RunStream(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
+func (a *Agent) RunStream(ctx context.Context, prompt *Prompt, opts ...ModelOption) (stream.Streamable[*Message], error) {
 	ctx, invocation := a.buildInvocationContext(ctx)
 	input, err := a.inputHandler(ctx, prompt, invocation.Session.State())
 	if err != nil {
@@ -348,39 +349,41 @@ func (a *Agent) handler(invocation *InvocationContext, req *ModelRequest) Runnab
 			}
 			return nil, ErrMaxIterationsExceeded
 		},
-		HandleStream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (Streamable[*Message], error) {
-			pipe := NewStreamPipe[*Message]()
-			pipe.Go(func() error {
+		HandleStream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (stream.Streamable[*Message], error) {
+			return stream.Go(func(yield func(*Message, error) bool) {
 				// find resume message
 				if message, ok := a.findResumeMessage(ctx, invocation); ok {
-					pipe.Send(message)
-					return nil
+					yield(message, nil)
+					return
 				}
 				var toolMessages []*Message
 				for i := 0; i < a.maxIterations; i++ {
-					stream, err := a.provider.NewStream(ctx, req, opts...)
+					events, err := a.provider.NewStream(ctx, req, opts...)
 					if err != nil {
-						return err
+						yield(nil, err)
+						return
 					}
 					var finalResponse *ModelResponse
-					for stream.Next() {
-						chunk, err := stream.Current()
+					for res, err := range events {
 						if err != nil {
-							return err
+							yield(nil, err)
+							return
 						}
-						if chunk.Message.Status == StatusCompleted {
-							finalResponse = chunk
+						if res.Message.Status == StatusCompleted {
+							finalResponse = res
 						} else {
-							pipe.Send(chunk.Message)
+							yield(res.Message, nil)
 						}
 					}
 					if finalResponse == nil {
-						return ErrMissingFinalResponse
+						yield(nil, ErrMissingFinalResponse)
+						return
 					}
 					if finalResponse.Message.Role == RoleTool {
 						toolMessage, err := a.executeTools(ctx, finalResponse.Message)
 						if err != nil {
-							return err
+							yield(nil, err)
+							return
 						}
 						req.Messages = append(req.Messages, toolMessage)
 						toolMessages = append(toolMessages, toolMessage)
@@ -389,17 +392,18 @@ func (a *Agent) handler(invocation *InvocationContext, req *ModelRequest) Runnab
 					// handle the final response before sending
 					finalResponse.Message, err = a.outputHandler(ctx, finalResponse.Message, invocation.Session.State())
 					if err != nil {
-						return err
+						yield(nil, err)
+						return
 					}
 					if err := a.storeSession(ctx, invocation, prompt.Messages, toolMessages, finalResponse.Message); err != nil {
-						return err
+						yield(nil, err)
+						return
 					}
-					pipe.Send(finalResponse.Message)
-					return nil
+					yield(finalResponse.Message, nil)
+					return
 				}
-				return ErrMaxIterationsExceeded
-			})
-			return pipe, nil
+				yield(nil, ErrMaxIterationsExceeded)
+			}), nil
 		},
 	})
 	if len(a.middlewares) > 0 {

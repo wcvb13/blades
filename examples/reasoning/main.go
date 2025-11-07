@@ -22,11 +22,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for stream.Next() {
-		res, err := stream.Current()
+	for m, err := range stream {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Println(res.Text())
+		log.Println(m.Text())
 	}
 }

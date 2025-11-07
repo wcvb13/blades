@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/go-kratos/blades"
+	"github.com/go-kratos/blades/stream"
 )
 
 const (
@@ -99,34 +100,33 @@ func (t *tracing) Run(ctx context.Context, prompt *blades.Prompt, opts ...blades
 }
 
 // RunStream processes the prompt in a streaming manner and adds OpenTelemetry tracing to the invocation before passing it to the next runnable.
-func (t *tracing) RunStream(ctx context.Context, prompt *blades.Prompt, opts ...blades.ModelOption) (blades.Streamable[*blades.Message], error) {
+func (t *tracing) RunStream(ctx context.Context, prompt *blades.Prompt, opts ...blades.ModelOption) (stream.Streamable[*blades.Message], error) {
 	ac, ok := blades.FromContext(ctx)
 	if !ok {
 		return t.next.RunStream(ctx, prompt, opts...)
 	}
-
 	ctx, span := t.start(ctx, ac, opts...)
-
-	pipe := blades.NewStreamPipe[*blades.Message]()
-	pipe.Go(func() error {
-		stream, err := t.next.RunStream(ctx, prompt, opts...)
-		if err != nil {
-			t.end(span, nil, err)
-			return err
-		}
-		var message *blades.Message
-		for stream.Next() {
-			message, err = stream.Current()
+	streaming, err := t.next.RunStream(ctx, prompt, opts...)
+	if err != nil {
+		t.end(span, nil, err)
+		return nil, err
+	}
+	return stream.Go(func(yield func(*blades.Message, error) bool) {
+		var (
+			err     error
+			message *blades.Message
+		)
+		for message, err = range streaming {
 			if err != nil {
-				t.end(span, nil, err)
-				return err
+				yield(nil, err)
+				break
 			}
-			pipe.Send(message)
+			if !yield(message, nil) {
+				break
+			}
 		}
-		t.end(span, message, nil)
-		return nil
-	})
-	return pipe, nil
+		t.end(span, message, err)
+	}), nil
 }
 
 func (t *tracing) end(span trace.Span, msg *blades.Message, err error) {
@@ -136,6 +136,9 @@ func (t *tracing) end(span trace.Span, msg *blades.Message, err error) {
 		span.SetStatus(codes.Error, err.Error())
 	} else {
 		span.SetStatus(codes.Ok, codes.Ok.String())
+	}
+	if msg == nil {
+		return
 	}
 	if msg.FinishReason != "" {
 		span.SetAttributes(semconv.GenAIResponseFinishReasons(msg.FinishReason))

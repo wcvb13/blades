@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-kratos/blades"
 	"github.com/go-kratos/blades/contrib/openai"
+	"github.com/go-kratos/blades/stream"
 )
 
 // Guardrails is a middleware that adds guardrails to the prompt.
@@ -21,10 +22,18 @@ func (m *Guardrails) Run(ctx context.Context, prompt *blades.Prompt, opts ...bla
 }
 
 // RunStream processes the prompt in a streaming manner and adds guardrails before passing it to the next runnable.
-func (m *Guardrails) RunStream(ctx context.Context, prompt *blades.Prompt, opts ...blades.ModelOption) (blades.Streamable[*blades.Message], error) {
+func (m *Guardrails) RunStream(ctx context.Context, prompt *blades.Prompt, opts ...blades.ModelOption) (stream.Streamable[*blades.Message], error) {
 	// Pre-processing: Add guardrails to the prompt
 	log.Println("Applying guardrails to the prompt (streaming)")
-	return m.next.RunStream(ctx, prompt, opts...)
+	streaming, err := m.next.RunStream(ctx, prompt, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return stream.Observe(streaming, func(event *blades.Message) error {
+		// Post-processing: Filter messages if necessary
+		log.Println("Processing streamed message:", event)
+		return nil
+	}), nil
 }
 
 func newGuardrails(next blades.Runnable) blades.Runnable {

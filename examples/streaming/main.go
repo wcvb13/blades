@@ -11,7 +11,7 @@ import (
 func main() {
 	agent := blades.NewAgent(
 		"Stream Agent",
-		blades.WithModel("gpt-5"),
+		blades.WithModel("deepseek-chat"),
 		blades.WithProvider(openai.NewChatProvider()),
 		blades.WithInstructions("You are a helpful assistant that provides detailed answers."),
 	)
@@ -22,11 +22,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for stream.Next() {
-		chunk, err := stream.Current()
+	for m, err := range stream {
 		if err != nil {
-			log.Fatalf("stream recv error: %v", err)
+			log.Fatal(err)
 		}
-		log.Print(chunk.Text())
+		log.Println(m.Status, m.Text())
 	}
 }
