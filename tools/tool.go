@@ -1,20 +1,36 @@
 package tools
 
 import (
+	"context"
+
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-// Tool represents a tool with a name, description, input schema, and a tool handler.
-type Tool struct {
-	Name         string                  `json:"name"`
-	Description  string                  `json:"description"`
-	InputSchema  *jsonschema.Schema      `json:"inputSchema"`
-	OutputSchema *jsonschema.Schema      `json:"outputSchema"`
-	Handler      Handler[string, string] `json:"-"`
+type Tool interface {
+	Name() string
+	Description() string
+	InputSchema() *jsonschema.Schema
+	OutputSchema() *jsonschema.Schema
+	Handle(context.Context, string) (string, error)
 }
 
-// NewTool creates a new Tool with the given name, description, input and output types, and handler.
-func NewTool[I, O any](name string, description string, handler Handler[I, O]) (*Tool, error) {
+// NewTool creates a new Tool with the given name, description, and handler.
+func NewTool(name string, description string, handler Handler[string, string], opts ...Option) Tool {
+	t := &baseTool{
+		name:         name,
+		description:  description,
+		inputSchema:  nil,
+		outputSchema: nil,
+		handler:      handler,
+	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
+// NewFunc creates a new Tool with the given name, description, input and output types, and handler.
+func NewFunc[I, O any](name string, description string, handler Handler[I, O]) (Tool, error) {
 	inputSchema, err := jsonschema.For[I](nil)
 	if err != nil {
 		return nil, err
@@ -23,11 +39,11 @@ func NewTool[I, O any](name string, description string, handler Handler[I, O]) (
 	if err != nil {
 		return nil, err
 	}
-	return &Tool{
-		Name:         name,
-		Description:  description,
-		InputSchema:  inputSchema,
-		OutputSchema: outputSchema,
-		Handler:      JSONAdapter(handler),
+	return &baseTool{
+		name:         name,
+		description:  description,
+		inputSchema:  inputSchema,
+		outputSchema: outputSchema,
+		handler:      JSONAdapter(handler),
 	}, nil
 }
