@@ -38,20 +38,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	prompt := blades.NewPrompt(
-		blades.UserMessage(blades.TextPart{
-			Text: string(content),
-		}),
+	var (
+		input  = blades.UserMessage(string(content))
+		output *blades.Message
 	)
-	result, err := tr.Run(context.Background(), prompt)
-	if err != nil {
-		log.Fatal(err)
+	for _, agent := range []blades.Agent{tr, refine} {
+		runner := blades.NewRunner(agent)
+		output, err = runner.Run(context.Background(), input)
+		if err != nil {
+			log.Fatal(err)
+		}
+		input = output
 	}
-	result, err = refine.Run(context.Background(), blades.NewPrompt(result))
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := os.WriteFile(output, []byte(result.Text()), 0644); err != nil {
+	if err := os.WriteFile(output.Text(), []byte(output.Text()), 0644); err != nil {
 		log.Fatal(err)
 	}
 }

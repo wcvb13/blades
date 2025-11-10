@@ -13,7 +13,8 @@ type Session interface {
 	ID() string
 	State() State
 	History() []*Message
-	Append(context.Context, State, []*Message) error
+	PutState(key string, value any) error
+	Append(context.Context, []*Message) error
 }
 
 // NewSession creates a new Session instance with an auto-generated UUID and optional initial state maps.
@@ -25,15 +26,6 @@ func NewSession(states ...map[string]any) Session {
 		}
 	}
 	return session
-}
-
-// FromSessionContext retrieves the SessionContext from the context.
-func FromSessionContext(ctx context.Context) (Session, bool) {
-	invocation, ok := FromInvocationContext(ctx)
-	if !ok {
-		return nil, false
-	}
-	return invocation.Session(), true
 }
 
 // sessionInMemory is an in-memory implementation of the Session interface.
@@ -57,12 +49,15 @@ func (s *sessionInMemory) History() []*Message {
 	defer s.m.RUnlock()
 	return slices.Clone(s.history)
 }
-func (s *sessionInMemory) Append(ctx context.Context, state State, history []*Message) error {
+func (s *sessionInMemory) PutState(key string, value any) error {
 	s.m.Lock()
 	defer s.m.Unlock()
-	for k, v := range state {
-		s.state[k] = v
-	}
+	s.state[key] = value
+	return nil
+}
+func (s *sessionInMemory) Append(ctx context.Context, history []*Message) error {
+	s.m.Lock()
+	defer s.m.Unlock()
 	s.history = append(s.history, history...)
 	return nil
 }

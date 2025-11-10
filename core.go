@@ -2,43 +2,44 @@ package blades
 
 import (
 	"context"
-	"strings"
+	"iter"
 
-	"github.com/go-kratos/blades/stream"
+	"github.com/google/uuid"
 )
 
-// Prompt represents a sequence of messages exchanged between a user and an assistant.
-type Prompt struct {
-	Messages []*Message `json:"messages"`
+// Invocation holds information about the current invocation.
+type Invocation struct {
+	ID           string
+	Session      Session
+	Resumable    bool
+	Streamable   bool
+	Message      *Message
+	ModelOptions []ModelOption
 }
 
-// NewPrompt creates a new Prompt with the given messages.
-func NewPrompt(messages ...*Message) *Prompt {
-	return &Prompt{
-		Messages: messages,
-	}
+// Generator is a generic type representing a sequence generator that yields values of type T or errors of type E.
+type Generator[T, E any] iter.Seq2[T, E]
+
+// Agent represents an autonomous agent that can process invocations and produce a sequence of messages.
+type Agent interface {
+	Name() string
+	Description() string
+	Run(context.Context, *Invocation) Generator[*Message, error]
 }
 
-// Latest returns the most recent message in the prompt, or nil if there are no messages.
-func (p *Prompt) Latest() *Message {
-	if len(p.Messages) == 0 {
-		return nil
-	}
-	return p.Messages[len(p.Messages)-1]
+// Runner represents a component that can execute a single message and return a response message or a stream of messages.
+type Runner interface {
+	Run(context.Context, *Message, ...ModelOption) (*Message, error)
+	RunStream(context.Context, *Message, ...ModelOption) Generator[*Message, error]
 }
 
-// String returns the string representation of the prompt by concatenating all message strings.
-func (p *Prompt) String() string {
-	var buf strings.Builder
-	for _, m := range p.Messages {
-		buf.WriteString(m.Text())
-		buf.WriteByte('\n')
-	}
-	return strings.TrimSuffix(buf.String(), "\n")
+// NewInvocationID generates a new unique invocation ID.
+func NewInvocationID() string {
+	return uuid.NewString()
 }
 
-// Runnable represents an entity that can process prompts and generate responses.
-type Runnable interface {
-	Run(context.Context, *Prompt, ...ModelOption) (*Message, error)
-	RunStream(context.Context, *Prompt, ...ModelOption) stream.Streamable[*Message]
+// Clone creates a deep copy of the Invocation.
+func (i *Invocation) Clone() *Invocation {
+	clone := *i
+	return &clone
 }

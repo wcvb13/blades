@@ -3,73 +3,73 @@ package blades
 import (
 	"context"
 	"fmt"
+	"html/template"
+	"strings"
 
-	"github.com/go-kratos/blades/stream"
 	"github.com/go-kratos/blades/tools"
 	"github.com/google/jsonschema-go/jsonschema"
 	"golang.org/x/sync/errgroup"
 )
 
 var (
-	_ Runnable     = (*Agent)(nil)
-	_ AgentContext = (*Agent)(nil)
+	_ AgentContext = (*agent)(nil)
 )
 
 // AgentOption is an option for configuring the Agent.
-type AgentOption func(*Agent)
+type AgentOption func(*agent)
 
 // WithModel sets the model for the Agent.
 func WithModel(model string) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.model = model
 	}
 }
 
 // WithDescription sets the description for the Agent.
 func WithDescription(description string) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.description = description
 	}
 }
 
 // WithInstructions sets the instructions for the Agent.
 func WithInstructions(instructions string) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.instructions = instructions
 	}
 }
 
 // WithInputSchema sets the input schema for the Agent.
 func WithInputSchema(schema *jsonschema.Schema) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.inputSchema = schema
 	}
 }
 
 // WithOutputSchema sets the output schema for the Agent.
 func WithOutputSchema(schema *jsonschema.Schema) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.outputSchema = schema
 	}
 }
 
 // WithOutputKey sets the output key for storing the Agent's output in the session state.
 func WithOutputKey(key string) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.outputKey = key
 	}
 }
 
 // WithProvider sets the model provider for the Agent.
 func WithProvider(provider ModelProvider) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.provider = provider
 	}
 }
 
 // WithTools sets the tools for the Agent.
 func WithTools(tools ...*tools.Tool) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.tools = tools
 	}
 }
@@ -78,42 +78,28 @@ func WithTools(tools ...*tools.Tool) AgentOption {
 // The resolver can dynamically provide tools from various sources (e.g., MCP servers, plugins).
 // Tools are resolved lazily on first use.
 func WithToolsResolver(r tools.Resolver) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.toolsResolver = r
 	}
 }
 
 // WithMiddleware sets the middleware for the Agent.
 func WithMiddleware(ms ...Middleware) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.middlewares = ms
-	}
-}
-
-// WithStateInputHandler sets the state input handler for the Agent.
-func WithStateInputHandler(h StateInputHandler) AgentOption {
-	return func(a *Agent) {
-		a.inputHandler = h
-	}
-}
-
-// WithStateOutputHandler sets the state output handler for the Agent.
-func WithStateOutputHandler(h StateOutputHandler) AgentOption {
-	return func(a *Agent) {
-		a.outputHandler = h
 	}
 }
 
 // WithMaxIterations sets the maximum number of iterations for the Agent.
 // By default, it is set to 10.
 func WithMaxIterations(n int) AgentOption {
-	return func(a *Agent) {
+	return func(a *agent) {
 		a.maxIterations = n
 	}
 }
 
-// Agent is a struct that represents an AI agent.
-type Agent struct {
+// agent is a struct that represents an AI agent.
+type agent struct {
 	name          string
 	model         string
 	description   string
@@ -122,8 +108,6 @@ type Agent struct {
 	maxIterations int
 	inputSchema   *jsonschema.Schema
 	outputSchema  *jsonschema.Schema
-	inputHandler  StateInputHandler
-	outputHandler StateOutputHandler
 	middlewares   []Middleware
 	provider      ModelProvider
 	tools         []*tools.Tool
@@ -131,16 +115,10 @@ type Agent struct {
 }
 
 // NewAgent creates a new Agent with the given name and options.
-func NewAgent(name string, opts ...AgentOption) *Agent {
-	a := &Agent{
+func NewAgent(name string, opts ...AgentOption) Agent {
+	a := &agent{
 		name:          name,
 		maxIterations: 10,
-		inputHandler: func(ctx context.Context, prompt *Prompt, state State) (*Prompt, error) {
-			return prompt, nil
-		},
-		outputHandler: func(ctx context.Context, output *Message, state State) (*Message, error) {
-			return output, nil
-		},
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -149,37 +127,27 @@ func NewAgent(name string, opts ...AgentOption) *Agent {
 }
 
 // Name returns the name of the Agent.
-func (a *Agent) Name() string {
+func (a *agent) Name() string {
 	return a.name
 }
 
-// Description returns the description of the Agent.
-func (a *Agent) Description() string {
-	return a.description
-}
-
 // Model returns the model of the Agent.
-func (a *Agent) Model() string {
+func (a *agent) Model() string {
 	return a.model
 }
 
+// Description returns the description of the Agent.
+func (a *agent) Description() string {
+	return a.description
+}
+
 // Instructions returns the instructions of the Agent.
-func (a *Agent) Instructions() string {
+func (a *agent) Instructions() string {
 	return a.instructions
 }
 
-// buildInvocationContext builds the context for the Agent by embedding the AgentContext.
-func (a *Agent) buildInvocationContext(ctx context.Context) (context.Context, InvocationContext) {
-	invocation, ok := FromInvocationContext(ctx)
-	if !ok {
-		invocation = NewRunner(a)
-		ctx = NewInvocationContext(ctx, invocation)
-	}
-	return NewAgentContext(ctx, a), invocation
-}
-
 // resolveTools combines static tools with dynamically resolved tools.
-func (a *Agent) resolveTools(ctx context.Context) ([]*tools.Tool, error) {
+func (a *agent) resolveTools(ctx context.Context) ([]*tools.Tool, error) {
 	tools := make([]*tools.Tool, 0, len(a.tools))
 	if len(a.tools) > 0 {
 		tools = append(tools, a.tools...)
@@ -195,7 +163,7 @@ func (a *Agent) resolveTools(ctx context.Context) ([]*tools.Tool, error) {
 }
 
 // buildRequest builds the request for the Agent by combining system instructions and user messages.
-func (a *Agent) buildRequest(ctx context.Context, prompt *Prompt) (*ModelRequest, error) {
+func (a *agent) buildRequest(ctx context.Context, invocation *Invocation) (*ModelRequest, error) {
 	tools, err := a.resolveTools(ctx)
 	if err != nil {
 		return nil, err
@@ -208,50 +176,48 @@ func (a *Agent) buildRequest(ctx context.Context, prompt *Prompt) (*ModelRequest
 	}
 	// system messages
 	if a.instructions != "" {
-		system, err := NewPromptTemplate().System(a.instructions).BuildContext(ctx)
+		var buf strings.Builder
+		t, err := template.New("instructions").Parse(a.instructions)
 		if err != nil {
 			return nil, err
 		}
-		req.Messages = append(req.Messages, system.Messages...)
+		if err := t.Execute(&buf, invocation.Session.State()); err != nil {
+			return nil, err
+		}
+		req.Messages = append(req.Messages, SystemMessage(buf.String()))
 	}
 	// user messages
-	if len(prompt.Messages) > 0 {
-		req.Messages = append(req.Messages, prompt.Messages...)
+	if invocation.Message != nil {
+		req.Messages = append(req.Messages, invocation.Message)
 	}
 	return &req, nil
 }
 
-// Run runs the agent with the given prompt and options, returning the response message.
-func (a *Agent) Run(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*Message, error) {
-	ctx, invocation := a.buildInvocationContext(ctx)
-	input, err := a.inputHandler(ctx, prompt, invocation.Session().State())
-	if err != nil {
-		return nil, err
-	}
-	req, err := a.buildRequest(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-	handler := a.handler(invocation, req)
-	return handler.Run(ctx, prompt, opts...)
-}
-
-// RunStream runs the agent with the given prompt and options, returning a streamable response.
-func (a *Agent) RunStream(ctx context.Context, prompt *Prompt, opts ...ModelOption) stream.Streamable[*Message] {
+// Run runs the agent with the given prompt and options, returning a streamable response.
+func (a *agent) Run(ctx context.Context, invocation *Invocation) Generator[*Message, error] {
 	return func(yield func(*Message, error) bool) {
-		ctx, invocation := a.buildInvocationContext(ctx)
-		input, err := a.inputHandler(ctx, prompt, invocation.Session().State())
+		ctx := NewAgentContext(ctx, a)
+		// initialize session if not present
+		if invocation.Session == nil {
+			invocation.Session = NewSession()
+		}
+		if message, ok := a.findResumeMessage(ctx, invocation); ok {
+			yield(message, nil)
+			return
+		}
+		req, err := a.buildRequest(ctx, invocation)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		req, err := a.buildRequest(ctx, input)
-		if err != nil {
-			yield(nil, err)
-			return
+		handler := Handler(HandleFunc(func(context.Context, *Invocation) Generator[*Message, error] {
+			return a.handle(ctx, invocation, req)
+		}))
+		if len(a.middlewares) > 0 {
+			handler = ChainMiddlewares(a.middlewares...)(handler)
 		}
-		handler := a.handler(invocation, req)
-		for m, err := range handler.RunStream(ctx, prompt, opts...) {
+		stream := handler.Handle(ctx, invocation)
+		for m, err := range stream {
 			if !yield(m, err) {
 				break
 			}
@@ -259,12 +225,12 @@ func (a *Agent) RunStream(ctx context.Context, prompt *Prompt, opts ...ModelOpti
 	}
 }
 
-func (a *Agent) findResumeMessage(ctx context.Context, invocation InvocationContext) (*Message, bool) {
-	if !invocation.Resumable() {
+func (a *agent) findResumeMessage(ctx context.Context, invocation *Invocation) (*Message, bool) {
+	if !invocation.Resumable {
 		return nil, false
 	}
-	for _, m := range invocation.Session().History() {
-		if m.InvocationID == invocation.InvocationID() &&
+	for _, m := range invocation.Session.History() {
+		if m.InvocationID == invocation.ID &&
 			m.Author == a.name && m.Role == RoleAssistant && m.Status == StatusCompleted {
 			return m, true
 		}
@@ -273,27 +239,30 @@ func (a *Agent) findResumeMessage(ctx context.Context, invocation InvocationCont
 }
 
 // storeSession stores the agent's output to session state (if outputKey is defined) and appends messages to session history.
-func (a *Agent) storeSession(ctx context.Context, invocation InvocationContext, userMessages, toolMessages []*Message, assistantMessage *Message) error {
-	state := State{}
+func (a *agent) storeSession(ctx context.Context, invocation *Invocation, toolMessages []*Message, assistantMessage *Message) error {
 	if a.outputKey != "" {
 		if a.outputSchema != nil {
 			value, err := ParseMessageState(assistantMessage, a.outputSchema)
 			if err != nil {
 				return err
 			}
-			state[a.outputKey] = value
+			if err := invocation.Session.PutState(a.outputKey, value); err != nil {
+				return err
+			}
 		} else {
-			state[a.outputKey] = assistantMessage.Text()
+			if err := invocation.Session.PutState(a.outputKey, assistantMessage.Text()); err != nil {
+				return err
+			}
 		}
 	}
-	stores := make([]*Message, 0, len(userMessages)+len(toolMessages)+1)
-	stores = append(stores, setMessageContext("user", invocation.InvocationID(), userMessages...)...)
-	stores = append(stores, setMessageContext(a.name, invocation.InvocationID(), toolMessages...)...)
-	stores = append(stores, setMessageContext(a.name, invocation.InvocationID(), assistantMessage)...)
-	return invocation.Session().Append(ctx, state, stores)
+	stores := make([]*Message, 0, len(toolMessages)+2)
+	stores = append(stores, setMessageContext("user", invocation.ID, invocation.Message)...)
+	stores = append(stores, setMessageContext(a.name, invocation.ID, toolMessages...)...)
+	stores = append(stores, setMessageContext(a.name, invocation.ID, assistantMessage)...)
+	return invocation.Session.Append(ctx, stores)
 }
 
-func (a *Agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error) {
+func (a *agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error) {
 	tools, err := a.resolveTools(ctx)
 	if err != nil {
 		return part, err
@@ -313,7 +282,7 @@ func (a *Agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error
 }
 
 // executeTools executes the tools specified in the tool parts.
-func (a *Agent) executeTools(ctx context.Context, message *Message) (*Message, error) {
+func (a *agent) executeTools(ctx context.Context, message *Message) (*Message, error) {
 	toolMessage := &Message{ID: message.ID, Role: message.Role, Parts: message.Parts}
 	eg, ctx := errgroup.WithContext(ctx)
 	for i, part := range message.Parts {
@@ -332,100 +301,58 @@ func (a *Agent) executeTools(ctx context.Context, message *Message) (*Message, e
 	return toolMessage, eg.Wait()
 }
 
-// handler constructs the default handlers for Run and Stream using the provider.
-func (a *Agent) handler(invocation InvocationContext, req *ModelRequest) Runnable {
-	handler := Runnable(&HandleFunc{
-		Handle: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) (*Message, error) {
-			// find resume message
-			if message, ok := a.findResumeMessage(ctx, invocation); ok {
-				return message, nil
-			}
-			var toolMessages []*Message
-			for i := 0; i < a.maxIterations; i++ {
-				res, err := a.provider.Generate(ctx, req, opts...)
+// handle constructs the default handlers for Run and Stream using the provider.
+func (a *agent) handle(ctx context.Context, invocation *Invocation, req *ModelRequest) Generator[*Message, error] {
+	return func(yield func(*Message, error) bool) {
+		var (
+			err           error
+			toolMessages  []*Message
+			finalResponse *ModelResponse
+		)
+		for i := 0; i < a.maxIterations; i++ {
+			if !invocation.Streamable {
+				finalResponse, err = a.provider.Generate(ctx, req, invocation.ModelOptions...)
 				if err != nil {
-					return nil, err
-				}
-				if res.Message.Role == RoleTool {
-					toolMessage, err := a.executeTools(ctx, res.Message)
-					if err != nil {
-						return nil, err
-					}
-					req.Messages = append(req.Messages, toolMessage)
-					toolMessages = append(toolMessages, toolMessage)
-					continue // continue to the next iteration
-				}
-				output, err := a.outputHandler(ctx, res.Message, invocation.Session().State())
-				if err != nil {
-					return nil, err
-				}
-				if err := a.storeSession(ctx, invocation, prompt.Messages, toolMessages, output); err != nil {
-					return nil, err
-				}
-				return output, nil
-			}
-			return nil, ErrMaxIterationsExceeded
-		},
-		HandleStream: func(ctx context.Context, prompt *Prompt, opts ...ModelOption) stream.Streamable[*Message] {
-			return func(yield func(*Message, error) bool) {
-				// find resume message
-				if message, ok := a.findResumeMessage(ctx, invocation); ok {
-					yield(message, nil)
+					yield(nil, err)
 					return
 				}
-				var (
-					err          error
-					toolMessages []*Message
-				)
-				for i := 0; i < a.maxIterations; i++ {
-					streaming := a.provider.NewStreaming(ctx, req, opts...)
-					var finalResponse *ModelResponse
-					for res, err := range streaming {
-						if err != nil {
-							yield(nil, err)
-							return
-						}
-						if res.Message.Status == StatusCompleted {
-							finalResponse = res
-						} else {
-							if !yield(res.Message, nil) {
-								return // early termination
-							}
-						}
-					}
-					if finalResponse == nil {
-						yield(nil, ErrNoFinalResponse)
-						return
-					}
-					if finalResponse.Message.Role == RoleTool {
-						toolMessage, err := a.executeTools(ctx, finalResponse.Message)
-						if err != nil {
-							yield(nil, err)
-							return
-						}
-						req.Messages = append(req.Messages, toolMessage)
-						toolMessages = append(toolMessages, toolMessage)
-						continue // continue to the next iteration
-					}
-					// handle the final response before sending
-					finalResponse.Message, err = a.outputHandler(ctx, finalResponse.Message, invocation.Session().State())
+			} else {
+				streaming := a.provider.NewStreaming(ctx, req, invocation.ModelOptions...)
+				for res, err := range streaming {
 					if err != nil {
 						yield(nil, err)
 						return
 					}
-					if err := a.storeSession(ctx, invocation, prompt.Messages, toolMessages, finalResponse.Message); err != nil {
-						yield(nil, err)
-						return
+					if res.Message.Status == StatusCompleted {
+						finalResponse = res
+					} else {
+						if !yield(res.Message, nil) {
+							return // early termination
+						}
 					}
-					yield(finalResponse.Message, nil)
+				}
+			}
+			if finalResponse == nil {
+				yield(nil, ErrNoFinalResponse)
+				return
+			}
+			if finalResponse.Message.Role == RoleTool {
+				toolMessage, err := a.executeTools(ctx, finalResponse.Message)
+				if err != nil {
+					yield(nil, err)
 					return
 				}
-				yield(nil, ErrMaxIterationsExceeded)
+				req.Messages = append(req.Messages, toolMessage)
+				toolMessages = append(toolMessages, toolMessage)
+				continue // continue to the next iteration
 			}
-		},
-	})
-	if len(a.middlewares) > 0 {
-		handler = ChainMiddlewares(a.middlewares...)(handler)
+			if err := a.storeSession(ctx, invocation, toolMessages, finalResponse.Message); err != nil {
+				yield(nil, err)
+				return
+			}
+			yield(finalResponse.Message, nil)
+			return
+		}
+		yield(nil, ErrMaxIterationsExceeded)
 	}
-	return handler
 }
