@@ -22,18 +22,17 @@ Blades 框架通过一系列精心设计的核心组件，实现了其强大的�
 * Memory (记忆)：为 Agent 提供短期或长期的记忆能力，实现具备上下文的连续对话。
 * Middleware (中间件)：类似于 Web 框架中的中间件，可以实现对 Agent 的横切面控制。
 
-### Runnable
-`Runnable` 是 Blades 框架中最核心的接口，它定义了所有可执行组件的基本行为。其设计旨在提供一个统一的执行范式，通过 `Run` 和 `RunStream` 方法，实现了框架内各种功能模块的**解耦、标准化和高度可组合性**。`Agent`、`Chain`、`ModelProvider` 等组件都实现了此接口，从而统一了它们的执行逻辑，使得不同组件能够像乐高积木一样灵活组合，构建复杂的 AI Agent。
+### Agent 
+`Agent` 是 Blades 框架中最核心的接口，它定义了所有可执行组件的基本行为。其设计旨在提供一个统一的执行范式，通过 `Run` 方法，实现了框架内各种功能模块的**解耦、标准化和高度可组合性**。`Agent`、`Chain`、`ModelProvider` 等组件都实现了此接口，从而统一了它们的执行逻辑，使得不同组件能够像乐高积木一样灵活组合，构建复杂的 AI Agent。
 
 ```go
-// Runnable represents an entity that can process prompts and generate responses.
-type Runnable interface {
-    Run(context.Context, *Prompt, ...ModelOption) (*Message, error)
-    RunStream(context.Context, *Prompt, ...ModelOption) (stream.Streamable[*Message])
+// Agent represents an autonomous agent that can process invocations and produce a sequence of messages.
+type Agent interface {
+    Name() string
+    Description() string
+    Run(context.Context, *Invocation) Generator[*Message, error]
 }
 ```
-![runnable](docs/images/runnable.png)
-
 
 ### ModelProvider
 `ModelProvider` 是 `Blades` 框架与底层大语言模型（LLM）进行交互的核心抽象层。其设计目标在于通过统一的接口实现**解耦和扩展性**，使得框架核心逻辑与特定模型（如 OpenAI, DeepSeek, Gemini 等）的实现细节分离。它扮演着适配器角色，负责将框架内部的标准化请求转换为模型原生 API 所需的格式，并将模型响应转换回框架标准格式，从而支持开发者轻松切换和集成不同的 LLM。
@@ -42,17 +41,17 @@ type Runnable interface {
 type ModelProvider interface {
     // Generate 执行一个完整的生成请求，并一次性返回结果。适用于不需要实时反馈的场景。
     Generate(context.Context, *ModelRequest, ...ModelOption) (*ModelResponse, error)
-    // NewStreaming 发起一个流式请求。该方法会立即返回一个 Streamable 对象，调用者可以通过这个对象逐步接收模型生成的内容，适用于构建实时的、打字机效果的对话应用。
-    NewStreaming(context.Context, *ModelRequest, ...ModelOption) (stream.Streamable[*ModelResponse])
+    // NewStreaming 发起一个流式请求。该方法会立即返回一个 Generator 对象，调用者可以通过这个对象逐步接收模型生成的内容，适用于构建实时的、打字机效果的对话应用。
+    NewStreaming(context.Context, *ModelRequest, ...ModelOption) (Generator[*ModelResponse])
 }
 ```
 ![ModelProvider](./docs/images/model.png)
 
 ### Agent
-`Agent` 是 `Blades` 框架中的核心协调者，作为最高层的 `Runnable`，它整合并编排 `ModelProvider`、`Tool`、`Memory` 和 `Middleware` 等组件，以理解用户意图并执行复杂的任务。其设计允许通过灵活的 `Option` 函数进行配置，从而驱动智能应用的行为和能力，实现任务编排、上下文管理和指令遵循等核心职责。
+`Agent` 是 `Blades` 框架中的核心协调者，作为最高层的 `Agent`，它整合并编排 `ModelProvider`、`Tool`、`Memory` 和 `Middleware` 等组件，以理解用户意图并执行复杂的任务。其设计允许通过灵活的 `Option` 函数进行配置，从而驱动智能应用的行为和能力，实现任务编排、上下文管理和指令遵循等核心职责。
 
 ### Flow
-`flow` 用于构建复杂的工作流和多步推理。其设计理念是将多个 `Runnable` 做编排，实现数据和控制流的传递，其中一个 `Runnable` 的输出可以作为下一个 `Runnable` 的输入。该机制使得开发者能够灵活地组合组件，构建高度定制化的 AI 工作流，实现多步推理和复杂数据处理，是实现 Agent 复杂决策流程的关键。
+`flow` 用于构建复杂的工作流和多步推理。其设计理念是将多个 `Agent` 做编排，实现数据和控制流的传递，其中一个 `Agent` 的输出可以作为下一个 `Agent` 的输入。该机制使得开发者能够灵活地组合组件，构建高度定制化的 AI 工作流，实现多步推理和复杂数据处理，是实现 Agent 复杂决策流程的关键。
 
 ### Tool
 `Tool` 是扩展 AI Agent 能力的关键组件，代表 Agent 可调用的外部功能或服务。其设计旨在赋予 Agent 与真实世界交互的能力，执行特定动作或获取外部信息。通过清晰的 `InputSchema`，它指导 LLM 生成正确的调用参数，并通过内部的 `Handle` 函数执行实际逻辑，从而将各种外部 API、数据库查询等封装成 Agent 可理解和可调用的形式。
@@ -99,11 +98,10 @@ func main() {
         blades.WithInstructions("You are a helpful assistant that provides detailed and accurate information."),
     )
     // Create a Prompt with user message
-    prompt := blades.NewPrompt(
-        blades.UserMessage("What is the capital of France?"),
-    )
+    input := blades.UserMessage("What is the capital of France?")
     // Run the Agent with the Prompt
-    output, err := agent.Run(context.Background(), prompt)
+    runner := blades.NewRunner(agent)
+    output, err := runner.Run(context.Background(), input)
     if err != nil {
         log.Fatal(err)
     }
