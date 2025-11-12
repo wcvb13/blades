@@ -54,7 +54,8 @@ func main() {
 	input := blades.UserMessage("What is the weather in New York City?")
 	session := blades.NewSession()
 	runner := blades.NewRunner(agent, blades.WithSession(session))
-	output, err := runner.Run(context.Background(), input)
+	ctx := context.Background()
+	output, err := runner.Run(ctx, input)
 	if err != nil {
 		log.Fatal(err)
 	}

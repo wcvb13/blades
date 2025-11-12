@@ -13,7 +13,7 @@ type Session interface {
 	ID() string
 	State() State
 	History() []*Message
-	PutState(key string, value any) error
+	PutState(string, any) error
 	Append(context.Context, []*Message) error
 }
 

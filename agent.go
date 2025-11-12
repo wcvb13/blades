@@ -169,17 +169,17 @@ func (a *agent) resolveTools(ctx context.Context) ([]tools.Tool, error) {
 
 // buildRequest builds the request for the Agent by combining system instructions and user messages.
 func (a *agent) buildRequest(ctx context.Context, invocation *Invocation) (*ModelRequest, error) {
-	tools, err := a.resolveTools(ctx)
+	resolvedTools, err := a.resolveTools(ctx)
 	if err != nil {
 		return nil, err
 	}
 	req := ModelRequest{
 		Model:        a.model,
-		Tools:        tools,
+		Tools:        resolvedTools,
 		InputSchema:  a.inputSchema,
 		OutputSchema: a.outputSchema,
 	}
-	// system messages
+	// Process system instructions with template if session state is available
 	if a.instructions != "" {
 		var (
 			state State
@@ -199,7 +199,11 @@ func (a *agent) buildRequest(ctx context.Context, invocation *Invocation) (*Mode
 		}
 		req.Instruction = SystemMessage(buf.String())
 	}
-	// user messages
+	// Append history and the current message
+	if len(invocation.History) > 0 {
+		req.Messages = append(req.Messages, invocation.History...)
+	}
+	// Append the current user message
 	if invocation.Message != nil {
 		req.Messages = append(req.Messages, invocation.Message)
 	}
@@ -211,16 +215,17 @@ func (a *agent) Run(ctx context.Context, invocation *Invocation) Generator[*Mess
 	return func(yield func(*Message, error) bool) {
 		ctx = NewAgentContext(ctx, a)
 		// If resumable and a completed message exists, return it directly.
-		if message, ok := a.findResumeMessage(ctx, invocation); ok {
-			yield(message, nil)
-			return
-		}
-		req, err := a.buildRequest(ctx, invocation)
-		if err != nil {
-			yield(nil, err)
+		if resumeMessage, ok := a.findResumeMessage(ctx, invocation); ok {
+			yield(resumeMessage, nil)
 			return
 		}
 		handler := Handler(HandleFunc(func(ctx context.Context, invocation *Invocation) Generator[*Message, error] {
+			req, err := a.buildRequest(ctx, invocation)
+			if err != nil {
+				return func(yield func(*Message, error) bool) {
+					yield(nil, err)
+				}
+			}
 			return a.handle(ctx, invocation, req)
 		}))
 		if len(a.middlewares) > 0 {

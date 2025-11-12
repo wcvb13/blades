@@ -14,6 +14,7 @@ type Invocation struct {
 	Resumable    bool
 	Streamable   bool
 	Message      *Message
+	History      []*Message
 	ModelOptions []ModelOption
 }
 
@@ -46,10 +47,4 @@ func NewInvocation(message *Message, opts ...ModelOption) *Invocation {
 		Message:      message,
 		ModelOptions: opts,
 	}
-}
-
-// Clone creates a deep copy of the Invocation.
-func (i *Invocation) Clone() *Invocation {
-	clone := *i
-	return &clone
 }
