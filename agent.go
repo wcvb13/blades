@@ -114,29 +114,9 @@ func (a *agent) Name() string {
 	return a.name
 }
 
-// Tools returns the tools of the Agent.
-func (a *agent) Tools() []tools.Tool {
-	return a.tools
-}
-
 // Description returns the description of the Agent.
 func (a *agent) Description() string {
 	return a.description
-}
-
-// Instructions returns the instructions of the Agent.
-func (a *agent) Instructions() string {
-	return a.instructions
-}
-
-// InputSchema returns the input schema of the Agent.
-func (a *agent) InputSchema() *jsonschema.Schema {
-	return a.inputSchema
-}
-
-// OutputSchema returns the output schema of the Agent.
-func (a *agent) OutputSchema() *jsonschema.Schema {
-	return a.outputSchema
 }
 
 // resolveTools combines static tools with dynamically resolved tools.
@@ -155,8 +135,8 @@ func (a *agent) resolveTools(ctx context.Context) ([]tools.Tool, error) {
 	return tools, nil
 }
 
-// buildInstruction builds the system instruction message for the Agent.
-func (a *agent) buildInstruction(ctx context.Context, invocation *Invocation) (*Message, error) {
+// buildInstructions builds the system instruction message for the Agent.
+func (a *agent) buildInstructions(ctx context.Context, invocation *Invocation) (string, error) {
 	if a.instructions != "" {
 		var (
 			state State
@@ -166,17 +146,17 @@ func (a *agent) buildInstruction(ctx context.Context, invocation *Invocation) (*
 			state = invocation.Session.State()
 			t, err := template.New("instructions").Parse(a.instructions)
 			if err != nil {
-				return nil, err
+				return "", err
 			}
 			if err := t.Execute(&buf, state); err != nil {
-				return nil, err
+				return "", err
 			}
 		} else {
 			buf.WriteString(a.instructions)
 		}
-		return SystemMessage(buf.String()), nil
+		return buf.String(), nil
 	}
-	return nil, nil
+	return "", nil
 }
 
 // Run runs the agent with the given prompt and options, returning a streamable response.
@@ -187,18 +167,16 @@ func (a *agent) Run(ctx context.Context, invocation *Invocation) Generator[*Mess
 			yield(nil, err)
 			return
 		}
-		instruction, err := a.buildInstruction(ctx, invocation)
+		instructions, err := a.buildInstructions(ctx, invocation)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		ctx = NewAgentContext(ctx, a)
-		ctx = NewModelContext(ctx, &modelContext{
+		ctx = NewAgentContext(ctx, &agentContext{
+			name:         a.name,
 			model:        a.model.Name(),
-			tools:        resolvedTools,
-			instruction:  instruction,
-			inputSchema:  a.inputSchema,
-			outputSchema: a.outputSchema,
+			description:  a.description,
+			instructions: instructions,
 		})
 		// If resumable and a completed message exists, return it directly.
 		if resumeMessage, ok := a.findResumeMessage(ctx, invocation); ok {
@@ -208,7 +186,7 @@ func (a *agent) Run(ctx context.Context, invocation *Invocation) Generator[*Mess
 		handler := Handler(HandleFunc(func(ctx context.Context, invocation *Invocation) Generator[*Message, error] {
 			req := &ModelRequest{
 				Tools:        resolvedTools,
-				Instruction:  instruction,
+				Instruction:  SystemMessage(instructions),
 				InputSchema:  a.inputSchema,
 				OutputSchema: a.outputSchema,
 			}
