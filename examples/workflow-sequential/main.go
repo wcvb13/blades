@@ -15,6 +15,7 @@ func main() {
 		"WriterAgent",
 		blades.WithModel(model),
 		blades.WithInstructions("Draft a short paragraph on climate change."),
+		blades.WithOutputKey("draft"),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -22,7 +23,8 @@ func main() {
 	reviewerAgent, err := blades.NewAgent(
 		"ReviewerAgent",
 		blades.WithModel(model),
-		blades.WithInstructions("Review the draft and suggest improvements."),
+		blades.WithInstructions(`Review the draft and suggest improvements.
+			Draft: {{.draft}}`),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -44,6 +46,6 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Println(message.Text())
+		log.Println(message.Author, message.Text())
 	}
 }
