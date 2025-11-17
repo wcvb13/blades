@@ -19,6 +19,7 @@ type Config struct {
 	TopP            float64
 	Temperature     float64
 	StopSequences   []string
+	RequestOptions  []option.RequestOption
 	Thinking        *anthropic.ThinkingConfigParamUnion
 }
 
@@ -31,7 +32,8 @@ type Claude struct {
 
 // NewModel creates a new Claude model provider with the given model name and configuration.
 func NewModel(model string, config Config) blades.ModelProvider {
-	var opts []option.RequestOption
+	// Apply BaseURL and APIKey if provided
+	opts := config.RequestOptions
 	if config.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(config.BaseURL))
 	}

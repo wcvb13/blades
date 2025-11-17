@@ -31,6 +31,7 @@ type AudioConfig struct {
 	ResponseFormat string
 	StreamFormat   string
 	Speed          float64
+	RequestOptions []option.RequestOption
 }
 
 // audioModel implements the blades.ModelProvider interface for audio generation.
@@ -42,9 +43,8 @@ type audioModel struct {
 
 // NewAudio creates a new instance of audioModel.
 func NewAudio(model string, config AudioConfig) blades.ModelProvider {
-	var (
-		opts []option.RequestOption
-	)
+	opts := config.RequestOptions
+	// Add base URL and API key if provided
 	if config.BaseURL != "" {
 		opts = append(opts, option.WithBaseURL(config.BaseURL))
 	}
