@@ -80,12 +80,15 @@ func (r *RoutingWorkflow) selectRoute(ctx context.Context, invocation *blades.In
 		return nil, err
 	}
 	buf.WriteString(string(routes))
+	buf.WriteString("\nOnly return the name of the routing key.")
 	for res, err := range r.Agent.Run(ctx, &blades.Invocation{Message: blades.UserMessage(buf.String())}) {
 		if err != nil {
 			return nil, err
 		}
 		choice := strings.TrimSpace(res.Text())
-		return r.agents[choice], nil
+		if a, ok := r.agents[choice]; ok {
+			return a, nil
+		}
 	}
 	return nil, fmt.Errorf("no route selected")
 }
@@ -93,8 +96,8 @@ func (r *RoutingWorkflow) selectRoute(ctx context.Context, invocation *blades.In
 func main() {
 	var (
 		routes = map[string]string{
-			"math_agent":    "You provide help with math problems. Explain your reasoning at each step and include examples.",
-			"history_agent": "You provide assistance with historical queries. Explain important events and context clearly.",
+			"math_agent": "You provide help with math problems. Explain your reasoning at each step and include examples.",
+			"geo_agent":  "You provide assistance with geographical queries. Explain geographic concepts, locations, and spatial relationships clearly.",
 		}
 	)
 	routing, err := NewRoutingWorkflow(routes)
