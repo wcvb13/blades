@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"maps"
 	"strings"
+	"sync"
 
 	"github.com/go-kratos/blades/tools"
 	"github.com/google/jsonschema-go/jsonschema"
@@ -279,22 +281,37 @@ func (a *agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error
 
 // executeTools executes the tools specified in the tool parts.
 func (a *agent) executeTools(ctx context.Context, message *Message) (*Message, error) {
-	toolMessage := &Message{ID: message.ID, Role: message.Role, Parts: message.Parts}
+	var (
+		m sync.Mutex
+	)
+	actions := maps.Clone(message.Actions)
+	if actions == nil {
+		actions = make(map[string]any)
+	}
 	eg, ctx := errgroup.WithContext(ctx)
 	for i, part := range message.Parts {
 		switch v := any(part).(type) {
 		case ToolPart:
 			eg.Go(func() error {
-				part, err := a.handleTools(ctx, v)
+				actions := maps.Clone(actions)
+				toolCtx := NewToolContext(ctx, &toolContext{
+					id:      v.ID,
+					name:    v.Name,
+					actions: actions,
+				})
+				part, err := a.handleTools(toolCtx, v)
 				if err != nil {
 					return err
 				}
-				toolMessage.Parts[i] = part
+				m.Lock()
+				message.Parts[i] = part
+				message.Actions = MergeActions(message.Actions, actions)
+				m.Unlock()
 				return nil
 			})
 		}
 	}
-	return toolMessage, eg.Wait()
+	return message, eg.Wait()
 }
 
 // handle constructs the default handlers for Run and Stream using the provider.
@@ -335,6 +352,15 @@ func (a *agent) handle(ctx context.Context, invocation *Invocation, req *ModelRe
 						yield(nil, err)
 						return
 					}
+					if finalResponse.Message.Role == RoleTool && finalResponse.Message.Status == StatusCompleted {
+						// Skip yielding tool messages during streaming.
+						// Tool messages with StatusCompleted indicate that a tool call has been made,
+						// but the result of the tool execution is not yet available. These messages
+						// will be processed and yielded after the tool execution is complete in the
+						// next step of the agent loop. This ensures that only completed tool results
+						// are sent to the client, maintaining correct message order and semantics.
+						continue
+					}
 					if !yield(finalResponse.Message, nil) {
 						return // early termination
 					}
@@ -350,6 +376,10 @@ func (a *agent) handle(ctx context.Context, invocation *Invocation, req *ModelRe
 					yield(nil, err)
 					return
 				}
+				if !yield(toolMessage, nil) {
+					return
+				}
+				// Append the tool response to the message history for the next iteration
 				req.Messages = append(req.Messages, toolMessage)
 				continue // continue to the next iteration
 			}
