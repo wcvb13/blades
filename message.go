@@ -2,6 +2,7 @@ package blades
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/google/uuid"
@@ -151,7 +152,7 @@ func (m *Message) String() string {
 
 // UserMessage creates a user-authored message from parts.
 func UserMessage[T contentPart](parts ...T) *Message {
-	return &Message{ID: NewMessageID(), Role: RoleUser, Parts: Parts(parts...)}
+	return &Message{ID: NewMessageID(), Role: RoleUser, Author: "user", Parts: Parts(parts...)}
 }
 
 // SystemMessage creates a system-authored message from parts.
@@ -225,4 +226,32 @@ func MergeActions(base, extra map[string]any) map[string]any {
 		actions[k] = v
 	}
 	return actions
+}
+
+// CloneMaps creates a shallow copy of the given map.
+func CloneMaps(m map[string]any) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	return maps.Clone(m)
+}
+
+// AppendMessages appends extra messages to base, replacing any messages in base that have matching IDs in extra.
+func AppendMessages(base []*Message, extra ...*Message) []*Message {
+	var (
+		sets     = make(map[string]struct{}, len(extra))
+		filtered = make([]*Message, 0, len(base))
+	)
+	for _, m := range extra {
+		if m.ID == "" {
+			continue
+		}
+		sets[m.ID] = struct{}{}
+	}
+	for _, m := range base {
+		if _, exists := sets[m.ID]; !exists {
+			filtered = append(filtered, m)
+		}
+	}
+	return append(filtered, extra...)
 }

@@ -2,9 +2,11 @@ package blades
 
 import (
 	"context"
+	"maps"
+	"sync"
 )
 
-// AgentContext provides metadata about an AI agent.
+// AgentContext provides metadata about an agent.
 type AgentContext interface {
 	Name() string
 	Description() string
@@ -15,13 +17,16 @@ type ToolContext interface {
 	ID() string
 	Name() string
 	Actions() map[string]any
+	// SetAction sets or updates an action in the tool's action map.
+	// This method is safe for concurrent use.
+	SetAction(key string, value any)
 }
 
 // ctxAgentKey is the context key for AgentContext.
 type ctxAgentKey struct{}
 
 // NewAgentContext returns a new context with the given AgentContext.
-func NewAgentContext(ctx context.Context, agent AgentContext) context.Context {
+func NewAgentContext(ctx context.Context, agent Agent) context.Context {
 	return context.WithValue(ctx, ctxAgentKey{}, agent)
 }
 
@@ -45,22 +50,11 @@ func FromToolContext(ctx context.Context) (ToolContext, bool) {
 	return tool, ok
 }
 
-type agentContext struct {
-	name        string
-	description string
-}
-
-func (a *agentContext) Name() string {
-	return a.name
-}
-func (a *agentContext) Description() string {
-	return a.description
-}
-
 type toolContext struct {
-	id      string
-	name    string
-	actions map[string]any
+	id           string
+	name         string
+	actions      map[string]any
+	actionsMutex sync.Mutex
 }
 
 func (t *toolContext) ID() string {
@@ -70,5 +64,12 @@ func (t *toolContext) Name() string {
 	return t.name
 }
 func (t *toolContext) Actions() map[string]any {
-	return t.actions
+	t.actionsMutex.Lock()
+	defer t.actionsMutex.Unlock()
+	return maps.Clone(t.actions)
+}
+func (t *toolContext) SetAction(key string, value any) {
+	t.actionsMutex.Lock()
+	t.actions[key] = value
+	t.actionsMutex.Unlock()
 }

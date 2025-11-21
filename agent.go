@@ -194,18 +194,20 @@ func (a *agent) prepareInvocation(ctx context.Context, invocation *Invocation) e
 func (a *agent) Run(ctx context.Context, invocation *Invocation) Generator[*Message, error] {
 	return func(yield func(*Message, error) bool) {
 		// If resumable and a completed message exists, return it directly.
-		if resumeMessage, ok := a.findResumeMessage(ctx, invocation); ok {
-			yield(resumeMessage, nil)
+		resumeMessages, ok := a.findResumeMessages(invocation)
+		if ok {
+			for _, resumeMessage := range resumeMessages {
+				if !yield(resumeMessage, nil) {
+					return
+				}
+			}
 			return
 		}
 		if err := a.prepareInvocation(ctx, invocation); err != nil {
 			yield(nil, err)
 			return
 		}
-		ctx = NewAgentContext(ctx, &agentContext{
-			name:        a.name,
-			description: a.description,
-		})
+		ctx = NewAgentContext(ctx, a)
 		handler := Handler(HandleFunc(func(ctx context.Context, invocation *Invocation) Generator[*Message, error] {
 			req := &ModelRequest{
 				Tools:        invocation.Tools,
@@ -214,10 +216,13 @@ func (a *agent) Run(ctx context.Context, invocation *Invocation) Generator[*Mess
 				OutputSchema: a.outputSchema,
 			}
 			if len(invocation.History) > 0 {
-				req.Messages = append(req.Messages, invocation.History...)
+				req.Messages = AppendMessages(req.Messages, invocation.History...)
 			}
-			if invocation.Message != nil {
-				req.Messages = append(req.Messages, invocation.Message)
+			switch {
+			case len(resumeMessages) > 0:
+				req.Messages = AppendMessages(req.Messages, resumeMessages...)
+			case invocation.Message != nil:
+				req.Messages = AppendMessages(req.Messages, invocation.Message)
 			}
 			return a.handle(ctx, invocation, req)
 		}))
@@ -233,53 +238,55 @@ func (a *agent) Run(ctx context.Context, invocation *Invocation) Generator[*Mess
 	}
 }
 
-func (a *agent) findResumeMessage(_ context.Context, invocation *Invocation) (*Message, bool) {
+func (a *agent) findResumeMessages(invocation *Invocation) ([]*Message, bool) {
 	if !invocation.Resumable || invocation.Session == nil {
 		return nil, false
 	}
+	var resumeMessages []*Message
 	for _, m := range invocation.Session.History() {
-		if m.InvocationID == invocation.ID &&
-			m.Author == a.name && m.Role == RoleAssistant && m.Status == StatusCompleted {
-			return m, true
+		if m.InvocationID == invocation.ID && m.Author == a.name {
+			resumeMessages = append(resumeMessages, m)
+			// If we find a completed assistant message, we can resume from here.
+			if m.Role == RoleAssistant && m.Status == StatusCompleted {
+				return resumeMessages, true
+			}
 		}
 	}
-	return nil, false
+	return resumeMessages, false
 }
 
-// storeSession stores the conversation messages in the session.
-func (a *agent) storeSession(ctx context.Context, invocation *Invocation, message *Message) error {
+// appendMessageToSession appends the given message to the session associated with the invocation.
+func (a *agent) appendMessageToSession(ctx context.Context, invocation *Invocation, message *Message) error {
 	if invocation.Session == nil {
 		return nil
 	}
-	message.Author = a.name
 	message.InvocationID = invocation.ID
 	switch message.Role {
 	case RoleUser:
-		return invocation.Session.Append(ctx, []*Message{message})
+		message.Author = "user"
+		return invocation.Session.Append(ctx, message)
 	case RoleTool:
+		message.Author = a.name
 		if message.Status != StatusCompleted {
 			return nil
 		}
-		return invocation.Session.Append(ctx, []*Message{message})
+		return invocation.Session.Append(ctx, message)
 	case RoleAssistant:
+		message.Author = a.name
 		if message.Status != StatusCompleted {
 			return nil
 		}
 		if a.outputKey != "" {
-			invocation.Session.PutState(a.outputKey, message.Text())
+			invocation.Session.SetState(a.outputKey, message.Text())
 		}
-		return invocation.Session.Append(ctx, []*Message{message})
+		return invocation.Session.Append(ctx, message)
 	}
 	return nil
 }
 
-func (a *agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error) {
-	tools, err := a.resolveTools(ctx)
-	if err != nil {
-		return part, err
-	}
+func (a *agent) handleTools(ctx context.Context, invocation *Invocation, part ToolPart) (ToolPart, error) {
 	// Search through all available tools (static + resolved)
-	for _, tool := range tools {
+	for _, tool := range invocation.Tools {
 		if tool.Name() == part.Name {
 			response, err := tool.Handle(ctx, part.Request)
 			if err != nil {
@@ -289,18 +296,15 @@ func (a *agent) handleTools(ctx context.Context, part ToolPart) (ToolPart, error
 			return part, nil
 		}
 	}
-	return part, fmt.Errorf("tool %s not found", part.Name)
+	return part, fmt.Errorf("agent: tool %s not found", part.Name)
 }
 
 // executeTools executes the tools specified in the tool parts.
-func (a *agent) executeTools(ctx context.Context, message *Message) (*Message, error) {
+func (a *agent) executeTools(ctx context.Context, invocation *Invocation, message *Message) (*Message, error) {
 	var (
 		m sync.Mutex
 	)
-	actions := maps.Clone(message.Actions)
-	if actions == nil {
-		actions = make(map[string]any)
-	}
+	actions := CloneMaps(message.Actions)
 	eg, ctx := errgroup.WithContext(ctx)
 	for i, part := range message.Parts {
 		switch v := any(part).(type) {
@@ -312,7 +316,7 @@ func (a *agent) executeTools(ctx context.Context, message *Message) (*Message, e
 					name:    v.Name,
 					actions: actions,
 				})
-				part, err := a.handleTools(toolCtx, v)
+				part, err := a.handleTools(toolCtx, invocation, v)
 				if err != nil {
 					return err
 				}
@@ -334,10 +338,6 @@ func (a *agent) handle(ctx context.Context, invocation *Invocation, req *ModelRe
 			err           error
 			finalResponse *ModelResponse
 		)
-		if err := a.storeSession(ctx, invocation, invocation.Message); err != nil {
-			yield(nil, err)
-			return
-		}
 		for i := 0; i < a.maxIterations; i++ {
 			if !invocation.Streamable {
 				finalResponse, err = a.model.Generate(ctx, req)
@@ -345,7 +345,7 @@ func (a *agent) handle(ctx context.Context, invocation *Invocation, req *ModelRe
 					yield(nil, err)
 					return
 				}
-				if err := a.storeSession(ctx, invocation, finalResponse.Message); err != nil {
+				if err := a.appendMessageToSession(ctx, invocation, finalResponse.Message); err != nil {
 					yield(nil, err)
 					return
 				}
@@ -361,17 +361,13 @@ func (a *agent) handle(ctx context.Context, invocation *Invocation, req *ModelRe
 						yield(nil, err)
 						return
 					}
-					if err := a.storeSession(ctx, invocation, finalResponse.Message); err != nil {
+					if err := a.appendMessageToSession(ctx, invocation, finalResponse.Message); err != nil {
 						yield(nil, err)
 						return
 					}
 					if finalResponse.Message.Role == RoleTool && finalResponse.Message.Status == StatusCompleted {
 						// Skip yielding tool messages during streaming.
 						// Tool messages with StatusCompleted indicate that a tool call has been made,
-						// but the result of the tool execution is not yet available. These messages
-						// will be processed and yielded after the tool execution is complete in the
-						// next step of the agent loop. This ensures that only completed tool results
-						// are sent to the client, maintaining correct message order and semantics.
 						continue
 					}
 					if !yield(finalResponse.Message, nil) {
@@ -384,7 +380,7 @@ func (a *agent) handle(ctx context.Context, invocation *Invocation, req *ModelRe
 				return
 			}
 			if finalResponse.Message.Role == RoleTool {
-				toolMessage, err := a.executeTools(ctx, finalResponse.Message)
+				toolMessage, err := a.executeTools(ctx, invocation, finalResponse.Message)
 				if err != nil {
 					yield(nil, err)
 					return
